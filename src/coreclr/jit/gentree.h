@@ -793,6 +793,8 @@ public:
 // Note that a node marked GTF_VAR_MULTIREG can only be a pure definition of all the fields, or a pure use of all the fields,
 // so we don't need the equivalent of GTF_VAR_USEASG.
 
+#define GTF_CAST_FOLDED         0x04000000 // GT_CAST -- the cast has already been folded by gtFoldCast.
+
 #define GTF_VAR_MULTIREG_DEATH0 0x04000000 // GT_LCL_VAR -- The last-use bit for a lclVar (the first register if it is multireg).
 #define GTF_VAR_DEATH           GTF_VAR_MULTIREG_DEATH0
 #define GTF_VAR_MULTIREG_DEATH1 0x08000000 // GT_LCL_VAR -- The last-use bit for the second register of a multireg lclVar.

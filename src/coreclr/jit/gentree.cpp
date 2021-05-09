@@ -13595,6 +13595,361 @@ DONE_FOLD:
     return op;
 }
 
+GenTree* Compiler::gtFoldCast(GenTreeCast* tree)
+{
+    enum class BitKind : uint8_t
+    {
+        None,
+        Source,
+        Zeroes,
+        Signs
+    };
+
+    static const size_t MAX_WIDTH = 3;
+    static const size_t INT_WIDTH = 2;
+
+    struct ChainOfCasts
+    {
+    private:
+        Compiler* m_compiler;
+        GenTree*  m_source;
+        size_t    m_sourceSize;
+        BitKind   m_bits[MAX_WIDTH + 1];
+
+        var_types UnsignedTypeForSize(size_t size)
+        {
+            switch (size)
+            {
+            case 1:
+                return TYP_UBYTE;
+            case 2:
+                return TYP_USHORT;
+            case 4:
+                return TYP_UINT;
+            default:
+                assert(size == 8);
+                return TYP_ULONG;
+            }
+        }
+
+        size_t CurrentSize()
+        {
+            assert(m_bits[0] == BitKind::Source);
+
+            size_t size = 1;
+            for (size_t i = 1; i <= MAX_WIDTH; i++)
+            {
+                if (m_bits[i] == BitKind::None)
+                {
+                    break;
+                }
+
+                size *= 2;
+            }
+
+            return size;
+        }
+
+        void PrintChain()
+        {
+            for (ssize_t i = MAX_WIDTH; i >= 0; i--)
+            {
+                const char* bitsName;
+                switch (m_bits[i])
+                {
+                    case BitKind::None:
+                        bitsName = "?";
+                        break;
+                    case BitKind::Source:
+                        bitsName = "@";
+                        break;
+                    case BitKind::Signs:
+                        bitsName = "-";
+                        break;
+                    case BitKind::Zeroes:
+                        bitsName = "0";
+                        break;
+                    default:
+                        unreached();
+                }
+
+                size_t count;
+                switch (i)
+                {
+                    case 3:
+                        count = 4;
+                        break;
+                    case 2:
+                        count = 2;
+                        break;
+                    case 1:
+                    case 0:
+                        count = 1;
+                        break;
+                    default:
+                        unreached();
+                }
+
+                for (size_t y = 0; y < count; y++)
+                {
+                    JITDUMP(bitsName);
+                }
+            }
+        }
+
+        BitKind Next(size_t currentWidth)
+        {
+            assert(currentWidth < MAX_WIDTH);
+
+            return m_bits[currentWidth + 1];
+        }
+
+        bool NextIs(BitKind bitKind, size_t currentWidth)
+        {
+            return (currentWidth < MAX_WIDTH) && (m_bits[currentWidth + 1] == bitKind);
+        }
+
+        bool NextIsNot(BitKind bitKind, size_t currentWidth)
+        {
+            if (currentWidth >= MAX_WIDTH)
+            {
+                return true;
+            }
+
+            return m_bits[currentWidth + 1] != bitKind;
+        }
+
+        bool NextIsInt(size_t currentWidth)
+        {
+            return (currentWidth + 1) == INT_WIDTH;
+        }
+
+    public:
+        ChainOfCasts(GenTree* source, Compiler* compiler)
+        {
+            for (size_t i = 0; i <= MAX_WIDTH; i++)
+            {
+                m_bits[i] = BitKind::None;
+            }
+
+            size_t sourceSize = genTypeSize(genActualType(source->TypeGet()));
+
+            if (source->OperIs(GT_LCL_VAR))
+            {
+                LclVarDsc* lclVar = compiler->lvaGetDesc(source->AsLclVar());
+                if (lclVar->lvNormalizeOnStore())
+                {
+                    sourceSize = genTypeSize(lclVar);
+                    JITDUMP("Source is a local variable normalized on store, narrowed the size");
+                }
+            }
+
+            for (size_t i = 0; i <= genLog2(sourceSize); i++)
+            {
+                m_bits[i] = BitKind::Source;
+            }
+
+            m_source = source;
+            m_sourceSize = sourceSize;
+            m_compiler = compiler;
+
+            JITDUMP("Prepared the chain, source is [%06u], size is %d", source->gtTreeID, sourceSize);
+            JITDUMP("\nInitial chain: ");
+            PrintChain();
+        }
+
+        void Push(GenTreeCast* cast)
+        {
+            JITDUMP("\nPushing [%06u] into the chain", cast->gtTreeID);
+
+            var_types targetType = cast->CastToType();
+            bool      fromUnsigned = cast->IsUnsigned();
+
+            Push(targetType, fromUnsigned);
+        }
+
+        void Push(var_types targetType, bool fromUnsigned)
+        {
+            size_t newSize = genTypeSize(targetType);
+            size_t oldSize = CurrentSize();
+
+            JITDUMP("\n   Old size: %d byte(s), new size: %d byte(s)", oldSize, newSize);
+
+            if (newSize <= oldSize)
+            {
+                JITDUMP("\n   Discarding %d upper byte(s)", oldSize - newSize);
+
+                size_t newWidth = genLog2(newSize);
+                for (size_t i = newWidth + 1; i <= MAX_WIDTH; i++)
+                {
+                    m_bits[i] = BitKind::None;
+                }
+
+                // Small signed/unsigned values are automatically sign/zero-extended to TYP_INT/TYP_UINT.
+                if (varTypeIsSmall(targetType))
+                {
+                    BitKind bits = varTypeIsUnsigned(targetType) ? BitKind::Zeroes : BitKind::Signs;
+
+                    JITDUMP("\n   %s-extending to 4 bytes", varTypeIsUnsigned(targetType) ? "Zero" : "Sign");
+
+                    for (size_t i = newWidth + 1; i <= INT_WIDTH; i++)
+                    {
+                        m_bits[i] = bits;
+                    }
+                }
+            }
+            else
+            {
+                size_t oldWidth = genLog2(oldSize);
+                size_t newWidth = genLog2(newSize);
+                BitKind newBits = fromUnsigned ? BitKind::Zeroes : BitKind::Signs;
+
+                JITDUMP("\n   %s-extending to %d bytes", fromUnsigned ? "Zero" : "Sign", newSize);
+
+                // The sign of an already zero-extended type is zero.
+                if (m_bits[oldWidth] == BitKind::Zeroes)
+                {
+                    newBits = BitKind::Zeroes;
+                }
+
+                for (size_t i = oldWidth + 1; i <= newWidth; i++)
+                {
+                    m_bits[i] = newBits;
+                }
+            }
+
+            JITDUMP("\n   Updated chain: ");
+            PrintChain();
+        }
+
+        GenTree* Serialize()
+        {
+            GenTree* source = m_source;
+
+            JITDUMP("\nChain before unwinding: ");
+            PrintChain();
+
+            for (size_t i = 0, size = 1; i <= MAX_WIDTH; i++, size *= 2)
+            {
+                BitKind bitKind = m_bits[i];
+
+                if (bitKind == BitKind::None)
+                {
+                    break;
+                }
+
+                if (bitKind == BitKind::Source)
+                {
+                    if (NextIsNot(BitKind::Source, i) && (size < m_sourceSize))
+                    {
+                        JITDUMP("\nUnwinding the chain: narrowing cast from %d byte(s) to %d byte(s)", m_sourceSize, size);
+
+                        var_types narrowType = UnsignedTypeForSize(size);
+                        if (size < genTypeSize(TYP_INT))
+                        {
+                            // Correctness: small signed types are implicitly sign-extended in IR, mirroring IL semantics.
+                            if (Next(i) == BitKind::Signs)
+                            {
+                                narrowType = varTypeUnsignedToSigned(narrowType);
+                            }
+                            else
+                            {
+                                assert(Next(i) == BitKind::Zeroes);
+                                assert(varTypeIsUnsigned(narrowType));
+                            }
+
+                            JITDUMP("\n   Cast to a small type: implicit %s-extension to 4 bytes", Next(i) == BitKind::Zeroes ? "zero" : "sign");
+                        }
+
+                        // For long -> int casts, it does not matter if we pick TYP_INT or TYP_UINT.
+                        // Likewise, GTF_UNSIGNED does not matter for truncating casts. We set it to zero.
+                        source = m_compiler->gtNewCastNode(genActualType(narrowType), source, false, narrowType);
+
+                        // TODO: remove this hack.
+                        source->gtFlags |= GTF_CAST_FOLDED;
+                        source->gtDebugFlags |= GTF_DEBUG_NODE_MORPHED;
+                    }
+
+                    continue;
+                }
+
+                assert((bitKind == BitKind::Zeroes) || (bitKind == BitKind::Signs));
+
+                // Optimization: if the next cast in the chain has the same effect,
+                // do not emit an intermediate one.
+                if (NextIs(bitKind, i))
+                {
+                    JITDUMP("\nSkipping cast to %d bytes - next cast has the same effect", size);
+                    continue;
+                }
+
+                if ((genTypeSize(source) == genTypeSize(TYP_INT)) && (i == INT_WIDTH))
+                {
+                    JITDUMP("\nSkipping cast to 4 bytes as implicit");
+                    continue;
+                }
+
+                // It does not matter what type do we "cast to" here, as long as its
+                // size is suitable, because we are not really "casting", but widening.
+                // And whether we zero-extend or sign-extend is controlled by the GTF_UNSIGNED flag.
+                bool      zeroExtend  = bitKind == BitKind::Zeroes;
+                var_types widenToType = UnsignedTypeForSize(size);
+                var_types stackType   = genActualType(widenToType);
+
+                source = m_compiler->gtNewCastNode(stackType, source, zeroExtend, widenToType);
+                JITDUMP("\nUnwinding the chain: %s extending to %d bytes via [%06u]",
+                        zeroExtend ? "zero" : "sign", size, source->gtTreeID);
+
+                // TODO: remove this hack.
+                source->gtFlags |= GTF_CAST_FOLDED;
+                source->gtDebugFlags |= GTF_DEBUG_NODE_MORPHED;
+            }
+
+            JITDUMP("\nUnwinding complete, the final tree:\n");
+            DISPTREE(source);
+            return source;
+        }
+
+        static GenTree* Collect(GenTree* source, ArrayStack<GenTreeCast*>* casts)
+        {
+            while (source->OperIs(GT_CAST) && varTypeIsIntegral(source) && varTypeIsIntegral(source->AsCast()->CastOp()) && !source->gtOverflow())
+            {
+                casts->Push(source->AsCast());
+                source = source->AsCast()->CastOp();
+            }
+
+            return source;
+        }
+    };
+
+    ArrayStack<GenTreeCast*> casts(getAllocator(CMK_ArrayStack));
+
+    GenTree* source = ChainOfCasts::Collect(tree, &casts);
+
+    JITDUMP("\nTrying to optimize a cast:\n");
+    DISPTREE(tree);
+
+    // If we are morphing the source, some more casts can be collected.
+    if (source->OperIs(GT_LCL_VAR) && varTypeIsSmall(source))
+    {
+        source = fgMorphLocalVar(source, /* forceRemorph */ false);
+        // TODO: remove this hack.
+        source->gtDebugFlags &= ~GTF_DEBUG_NODE_MORPHED;
+        source = ChainOfCasts::Collect(source, &casts);
+        // TODO: remove this hack.
+        source->gtDebugFlags &= ~GTF_DEBUG_NODE_MORPHED;
+    }
+
+    ChainOfCasts chain(source, this);
+
+    while (!casts.Empty())
+    {
+        chain.Push(casts.Pop());
+    }
+
+    return chain.Serialize();
+}
+
 //------------------------------------------------------------------------
 // gtFoldBoxNullable -- optimize a boxed nullable feeding a compare to zero
 //
