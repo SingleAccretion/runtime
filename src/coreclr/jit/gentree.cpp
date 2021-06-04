@@ -19755,3 +19755,40 @@ bool GenTree::IsInvariant() const
     GenTree* lclVarTree = nullptr;
     return OperIsConst() || Compiler::impIsAddressInLocal(this, &lclVarTree);
 }
+
+CorInfoHelpFunc GenTreeCast::GetImplementingHelper()
+{
+    var_types srcType = CastOp()->TypeGet();
+    var_types dstType = CastToType();
+
+#if defined(TARGET_AMD64)
+    if (srcType == TYP_DOUBLE)
+    {
+        if (dstType == TYP_LONG)
+        {
+            return CORINFO_HELP_DBL2ULNG;
+        }
+
+        if (gtOverflow())
+        {
+            switch (dstType)
+            {
+                case TYP_INT:
+                    return CORINFO_HELP_DBL2INT_OVF;
+                case TYP_UINT:
+                    return CORINFO_HELP_DBL2UINT_OVF;
+                case TYP_LONG:
+                    return CORINFO_HELP_DBL2LNG_OVF;
+                case TYP_ULONG:
+                    return CORINFO_HELP_DBL2ULNG_OVF;
+                default:
+                    break;
+            }
+        }
+    }
+#else
+    NYI("GetImplementingHelper!");
+#endif
+
+    return CORINFO_HELP_UNDEF;
+}

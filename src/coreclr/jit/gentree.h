@@ -3547,6 +3547,8 @@ struct GenTreeCast : public GenTreeOp
     {
     }
 #endif
+
+    CorInfoHelpFunc GetImplementingHelper();
 };
 
 // GT_BOX nodes are place markers for boxed values.  The "real" tree

@@ -4934,6 +4934,10 @@ public:
     // lowering that is distributed between fgMorph and the lowering phase of LSRA.
     void fgSimpleLowering();
 
+    void fgExpandCast(GenTreeCast* cast, LIR::Range& range);
+
+    GenTree* RepresentOpAsLocalVar(GenTree* op, GenTree* user, GenTree** edge, LIR::Range& range);
+
     GenTree* fgInitThisClass();
 
     GenTreeCall* fgGetStaticsCCtorHelper(CORINFO_CLASS_HANDLE cls, CorInfoHelpFunc helper);

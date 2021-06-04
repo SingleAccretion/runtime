@@ -3014,6 +3014,15 @@ void Compiler::fgSimpleLowering()
                     break;
                 }
 
+                case GT_CAST:
+                    fgExpandCast(tree->AsCast(), range);
+                    if (!tree->OperIs(GT_CALL))
+                    {
+                        break;
+                    }
+
+                    FALLTHROUGH;
+
 #if FEATURE_FIXED_OUT_ARGS
                 case GT_CALL:
                 {
@@ -3103,6 +3112,195 @@ void Compiler::fgSimpleLowering()
         printf("\n");
     }
 #endif
+}
+
+void Compiler::fgExpandCast(GenTreeCast* cast, LIR::Range& range)
+{
+    var_types srcType = cast->CastOp()->TypeGet();
+    var_types dstType = cast->CastToType();
+    if (cast->IsUnsigned())
+    {
+        srcType = varTypeToUnsigned(srcType);
+    }
+
+    auto prependCast = [this, cast, &range](var_types toType, bool overflow = false) {
+        GenTreeCast* intermediateCast = gtNewCastNode(genActualType(toType), cast->CastOp(), cast->IsUnsigned(), toType);
+
+        intermediateCast->gtFlags |= (cast->CastOp()->gtFlags & GTF_ALL_EFFECT);
+        if (overflow)
+        {
+            intermediateCast->gtFlags |= (GTF_OVERFLOW | GTF_EXCEPT);
+        }
+
+        cast->gtFlags &= ~GTF_UNSIGNED;
+        cast->CastOp() = intermediateCast;
+
+        range.InsertBefore(cast, intermediateCast);
+    };
+
+    auto prependHelper = [this, cast, &range](var_types type, CorInfoHelpFunc helper) {
+        GenTree*     op   = RepresentOpAsLocalVar(cast->CastOp(), cast, &cast->CastOp(), range);
+        GenTreeCall* call = gtNewHelperCallNode(helper, type, gtNewCallArgs(op));
+        call->gtFlags |= (cast->gtFlags & GTF_ALL_EFFECT);
+        fgMorphArgs(call);
+
+        cast->CastOp() = call;
+        range.InsertBefore(cast, call);
+    };
+
+    auto replaceWithHelper = [this, &range, cast](CorInfoHelpFunc helper) {
+        GenTree* op   = RepresentOpAsLocalVar(cast->CastOp(), cast, &cast->CastOp(), range);
+        fgMorphIntoHelperCall(cast, helper, gtNewCallArgs(op));
+    };
+
+    switch (srcType)
+    {
+        case TYP_UINT:
+#if defined(TARGET_AMD64) || defined(TARGET_X86)
+            if (varTypeIsFloating(dstType))
+            {
+                prependCast(TYP_LONG);
+                compLongUsed = true;
+#if defined(TARGET_X86)
+                replaceWithHelper(CORINFO_HELP_LNG2DBL);
+#endif
+            }
+#endif
+            break;
+
+        case TYP_LONG:
+        case TYP_ULONG:
+#if   defined(TARGET_AMD64)
+            if (dstType == TYP_FLOAT)
+            {
+                prependCast(TYP_DOUBLE);
+            }
+#elif defined(TARGET_X86) || defined(TARGET_ARM)
+            if (varTypeIsSmall(dstType))
+            {
+                prependCast(TYP_INT, cast->gtOverflow());
+            }
+            else if (varTypeIsFloating(dstType))
+            {
+                CorInfoHelpFunc helper = (srcType == TYP_LONG) ? CORINFO_HELP_LNG2DBL : CORINFO_HELP_ULNG2DBL;
+                if (dstType == TYP_FLOAT)
+                {
+                    prependHelper(TYP_DOUBLE, helper);
+                }
+                else
+                {
+                    replaceWithHelper(helper);
+                }
+            }
+#endif
+            break;
+
+        case TYP_FLOAT:
+        case TYP_DOUBLE:
+            CorInfoHelpFunc replacementHelper;
+            replacementHelper = CORINFO_HELP_UNDEF;
+
+            switch (dstType)
+            {
+                case TYP_BOOL:
+                case TYP_BYTE:
+                case TYP_UBYTE:
+                case TYP_SHORT:
+                case TYP_USHORT:
+                    if (srcType == TYP_FLOAT)
+                    {
+                        prependCast(TYP_DOUBLE);
+                    }
+
+                    if (cast->gtOverflow())
+                    {
+                        prependHelper(TYP_INT, CORINFO_HELP_DBL2INT_OVF);
+                    }
+                    else
+                    {
+                        prependCast(TYP_INT);
+                    }
+                    break;
+
+                case TYP_INT:
+                    if (cast->gtOverflow())
+                    {
+                        replacementHelper = CORINFO_HELP_DBL2INT_OVF;
+                    }
+                    break;
+
+                case TYP_UINT:
+                    if (cast->gtOverflow())
+                    {
+                        replacementHelper = CORINFO_HELP_DBL2UINT_OVF;
+                    }
+#if defined(TARET_X86)
+                    else
+                    {
+                        replacementHelper = CORINFO_HELP_DBL2UINT;
+                    }
+#endif
+                    break;
+
+                case TYP_LONG:
+                    if (cast->gtOverflow())
+                    {
+                        replacementHelper = CORINFO_HELP_DBL2LNG_OVF;
+                    }
+#if defined(TARGET_X86) || defined(TARGET_ARM)
+                    else
+                    {
+                        replaceWithHelper(CORINFO_HELP_DBL2LNG);
+                    }
+#endif
+                    break;
+
+                case TYP_ULONG:
+                    if (cast->gtOverflow())
+                    {
+                        replacementHelper = CORINFO_HELP_DBL2ULNG_OVF;
+                    }
+#if defined(TARGET_AMD64) || defined(TARGET_X86) || defined(TARGET_ARM)
+                    else
+                    {
+                        replacementHelper = CORINFO_HELP_DBL2ULNG;
+                    }
+#endif
+                    break;
+
+                default:
+                    break;
+            }
+
+            if (replacementHelper != CORINFO_HELP_UNDEF)
+            {
+                if (srcType == TYP_FLOAT)
+                {
+                    prependCast(TYP_DOUBLE);
+                }
+
+                replaceWithHelper(replacementHelper);
+            }
+
+            break;
+
+        default:
+            break;
+    }
+}
+
+GenTree* Compiler::RepresentOpAsLocalVar(GenTree* op, GenTree* user, GenTree** edge, LIR::Range& range)
+{
+    if (op->OperIs(GT_LCL_VAR))
+    {
+        return op;
+    }
+    else
+    {
+        LIR::Use opUse(range, edge, user);
+        opUse.ReplaceWithLclVar(this);
+        return *edge;
+    }
 }
 
 /*****************************************************************************************************
