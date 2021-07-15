@@ -4936,6 +4936,8 @@ public:
     void fgExpandQmarkStmt(BasicBlock* block, Statement* stmt);
     void fgExpandQmarkNodes();
 
+    PhaseStatus fgEarlyLowering();
+
     // Do "simple lowering."  This functionality is (conceptually) part of "general"
     // lowering that is distributed between fgMorph and the lowering phase of LSRA.
     void fgSimpleLowering();
@@ -5847,6 +5849,9 @@ private:
 #if !defined(TARGET_64BIT)
     //                  Recognize and morph a long multiplication with 32 bit operands.
     GenTreeOp* fgRecognizeAndMorphLongMul(GenTreeOp* mul);
+public:
+    bool fgRecognizeLongMul(GenTreeOp* mul);
+private:
     GenTreeOp* fgMorphLongMul(GenTreeOp* mul);
 #endif
 
@@ -5859,7 +5864,9 @@ private:
     GenTree* fgSetTreeSeq(GenTree* tree, GenTree* prev = nullptr, bool isLIR = false);
     void fgSetTreeSeqHelper(GenTree* tree, bool isLIR);
     void fgSetTreeSeqFinish(GenTree* tree, bool isLIR);
+public:
     void fgSetStmtSeq(Statement* stmt);
+private:
     void fgSetBlockOrder(BasicBlock* block);
 
     //------------------------- Morphing --------------------------------------

@@ -5665,6 +5665,9 @@ bool GenTree::OperRequiresCallFlag(Compiler* comp)
             // tree walk of the argument tree, so we just do it when morphing, instead, even though we'll
             // mark non-argument trees (that will still get converted to calls, anyway).
             return (this->TypeGet() == TYP_LONG) && (gtGetOp2()->OperGet() != GT_CNS_INT);
+
+        case GT_MUL:
+            return TypeIs(TYP_LONG);
 #endif // FEATURE_FIXED_OUT_ARGS && !TARGET_64BIT
 
         default:

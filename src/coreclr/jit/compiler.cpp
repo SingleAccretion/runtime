@@ -5106,6 +5106,8 @@ void Compiler::compCompile(void** methodCodePtr, uint32_t* methodCodeSize, JitFl
     //
     DoPhase(this, PHASE_DETERMINE_FIRST_COLD_BLOCK, &Compiler::fgDetermineFirstColdBlock);
 
+    DoPhase(this, PHASE_EARLY_LOWERING, &Compiler::fgEarlyLowering);
+
 #ifdef DEBUG
     fgDebugCheckLinks(compStressCompile(STRESS_REMORPH_TREES, 50));
 

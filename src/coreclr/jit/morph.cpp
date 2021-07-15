@@ -11132,45 +11132,6 @@ GenTree* Compiler::fgMorphSmpOp(GenTree* tree, MorphAddrContext* mac)
                     return fgMorphSmpOp(tree, mac);
                 }
             }
-
-#ifndef TARGET_64BIT
-            if (typ == TYP_LONG)
-            {
-                // For (long)int1 * (long)int2, we dont actually do the
-                // casts, and just multiply the 32 bit values, which will
-                // give us the 64 bit result in edx:eax.
-
-                if (tree->Is64RsltMul())
-                {
-                    // We are seeing this node again.
-                    // Morph only the children of casts,
-                    // so as to avoid losing them.
-                    assert(tree->gtIsValid64RsltMul());
-                    tree = fgMorphLongMul(tree->AsOp());
-
-                    goto DONE_MORPHING_CHILDREN;
-                }
-
-                tree = fgRecognizeAndMorphLongMul(tree->AsOp());
-
-                if (tree->Is64RsltMul())
-                {
-                    op1 = tree->AsOp()->gtGetOp1();
-                    op2 = tree->AsOp()->gtGetOp2();
-
-                    goto DONE_MORPHING_CHILDREN;
-                }
-                else
-                {
-                    if (tree->gtOverflow())
-                        helper = tree->IsUnsigned() ? CORINFO_HELP_ULMUL_OVF : CORINFO_HELP_LMUL_OVF;
-                    else
-                        helper = CORINFO_HELP_LMUL;
-
-                    goto USE_HELPER_FOR_ARITH;
-                }
-            }
-#endif // !TARGET_64BIT
             break;
 
         case GT_ARR_LENGTH:
@@ -12608,8 +12569,20 @@ DONE_MORPHING_CHILDREN:
 #ifndef TARGET_64BIT
             if (typ == TYP_LONG)
             {
-                // This must be GTF_MUL_64RSLT
-                assert(tree->gtIsValid64RsltMul());
+                if (op1->IsIntegralConst())
+                {
+                    std::swap(op1, op2);
+                    tree->AsOp()->gtOp1 = op1;
+                    tree->AsOp()->gtOp2 = op2;
+                }
+
+                if (fgRecognizeLongMul(tree->AsOp()))
+                {
+                    tree->Set64RsltMul();
+                    op1->SetDoNotCSE();
+                    op2->SetDoNotCSE();
+                }
+
                 return tree;
             }
 #endif // TARGET_64BIT
@@ -14738,6 +14711,97 @@ GenTreeOp* Compiler::fgRecognizeAndMorphLongMul(GenTreeOp* mul)
     mul->Set64RsltMul();
 
     return fgMorphLongMul(mul);
+}
+
+bool Compiler::fgRecognizeLongMul(GenTreeOp* mul)
+{
+    assert(mul->OperIs(GT_MUL));
+    assert(mul->TypeIs(TYP_LONG));
+
+    GenTree* op1 = mul->gtGetOp1();
+    GenTree* op2 = mul->gtGetOp2();
+
+    assert(op1->TypeIs(TYP_LONG) && op2->TypeIs(TYP_LONG));
+
+    if (!(op1->OperIs(GT_CAST) && genActualTypeIsInt(op1->AsCast()->CastOp())))
+    {
+        return false;
+    }
+
+    if (!(op2->OperIs(GT_CAST) && genActualTypeIsInt(op2->AsCast()->CastOp())) &&
+        !(op2->IsIntegralConst() && FitsIn<int32_t>(op2->AsIntConCommon()->IntegralValue())))
+    {
+        return false;
+    }
+
+    // Let fgMorphSmpOp take care of folding.
+    if (op1->IsIntegralConst() && op2->IsIntegralConst())
+    {
+        return false;
+    }
+
+    // We don't handle checked casts.
+    if (op1->gtOverflowEx() || op2->gtOverflowEx())
+    {
+        return false;
+    }
+
+    // The operands must have the same extending behavior, since the instruction
+    // used to compute the result will sign/zero-extend both operands at once.
+    bool op1ZeroExtends = op1->IsUnsigned();
+    bool op2ZeroExtends = op2->OperIs(GT_CAST) ? op2->IsUnsigned() : op2->AsIntConCommon()->IntegralValue() >= 0;
+    bool op2AnyExtensionIsSuitable = op2->IsIntegralConst() && op2ZeroExtends;
+    if ((op1ZeroExtends != op2ZeroExtends) && !op2AnyExtensionIsSuitable)
+    {
+        return false;
+    }
+
+    if (mul->gtOverflow())
+    {
+        auto getMaxValue = [mul](GenTree* op) -> int64_t {
+            if (op->OperIs(GT_CAST))
+            {
+                if (op->IsUnsigned())
+                {
+                    switch (op->AsCast()->CastOp()->TypeGet())
+                    {
+                        case TYP_UBYTE:
+                            return UINT8_MAX;
+                        case TYP_USHORT:
+                            return UINT16_MAX;
+                        default:
+                            return UINT32_MAX;
+                    }
+                }
+
+                return mul->IsUnsigned() ? static_cast<int64_t>(UINT64_MAX) : INT32_MIN;
+            }
+
+            return op->AsIntConCommon()->IntegralValue();
+        };
+
+        int64_t maxOp1 = getMaxValue(op1);
+        int64_t maxOp2 = getMaxValue(op2);
+
+        if (CheckedOps::MulOverflows(maxOp1, maxOp2, mul->IsUnsigned()))
+        {
+            return false;
+        }
+
+        mul->ClearOverflow();
+        mul->SetAllEffectsFlags(op1, op2);
+    }
+
+    // MUL_LONG needs to do the work the casts would have done.
+    mul->ClearUnsigned();
+    if (op1->IsUnsigned())
+    {
+        mul->SetUnsigned();
+    }
+
+    mul->Set64RsltMul();
+
+    return true;
 }
 
 //------------------------------------------------------------------------------

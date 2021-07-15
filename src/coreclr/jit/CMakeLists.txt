@@ -81,6 +81,7 @@ set( JIT_SOURCES
   compiler.cpp
   copyprop.cpp
   disasm.cpp
+  earlylower.cpp
   earlyprop.cpp
   ee_il_dll.cpp
   eeinterface.cpp
