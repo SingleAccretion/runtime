@@ -5072,11 +5072,6 @@ bool Compiler::optNarrowTree(GenTree* tree, var_types srct, var_types dstt, Valu
 
                 if (doit)
                 {
-                    if (tree->gtOper == GT_MUL && (tree->gtFlags & GTF_MUL_64RSLT))
-                    {
-                        tree->gtFlags &= ~GTF_MUL_64RSLT;
-                    }
-
                     tree->gtType = genActualType(dstt);
                     tree->SetVNs(vnpNarrow);
                 }

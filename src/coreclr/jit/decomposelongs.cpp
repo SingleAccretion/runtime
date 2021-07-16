@@ -416,7 +416,7 @@ GenTree* DecomposeLongs::DecomposeStoreLclVar(LIR::Use& use)
 
     GenTree* tree = use.Def();
     GenTree* rhs  = tree->gtGetOp1();
-    if (rhs->OperIs(GT_CALL) || (rhs->OperIs(GT_MUL_LONG) && (rhs->gtFlags & GTF_MUL_64RSLT) != 0))
+    if (rhs->OperIs(GT_CALL) || rhs->OperIs(GT_MUL_LONG))
     {
         // GT_CALLs are not decomposed, so will not be converted to GT_LONG
         // GT_STORE_LCL_VAR = GT_CALL are handled in genMultiRegCallStoreToLocal
@@ -612,8 +612,6 @@ GenTree* DecomposeLongs::DecomposeCast(LIR::Use& use)
                 // Skip cast decomposition so DecomposeMul doesn't need to bother with dead code removal,
                 // especially in the case of sign extending casts that also introduce new lclvars.
                 //
-
-                assert(use.User()->Is64RsltMul());
 
                 skipDecomposition = true;
             }
@@ -1520,16 +1518,15 @@ GenTree* DecomposeLongs::DecomposeRotate(LIR::Use& use)
 
 //------------------------------------------------------------------------
 // DecomposeMul: Decompose GT_MUL. The only GT_MULs that make it to decompose are
-// those with the GTF_MUL_64RSLT flag set. These muls result in a mul instruction that
-// returns its result in two registers like GT_CALLs do. Additionally, these muls are
-// guaranteed to be in the form long = (long)int * (long)int. Therefore, to decompose
-// these nodes, we convert them into GT_MUL_LONGs, undo the cast from int to long by
-// stripping out the lo ops, and force them into the form var = mul, as we do for
-// GT_CALLs. In codegen, we then produce a mul instruction that produces the result
-// in edx:eax on x86 or in any two chosen by RA registers on arm32, and store those
-// registers on the stack in genStoreLongLclVar.
+// those those that will result in a mul instruction that returns its result in two
+// registers like GT_CALLs do. Additionally, these muls are guaranteed to be in the
+// form long = (long)int * (long)int. Therefore, to decompose these nodes, we convert
+// them into GT_MUL_LONGs, undo the cast from int to long by  stripping out the lo ops,
+// and force them into the form var = mul, as we do for GT_CALLs. In codegen, we then
+// produce a mul instruction that produces the result in edx:eax on x86 or in any two
+// chosen by RA registers on arm32, and store those registers on the stack in genStoreLongLclVar.
 //
-// All other GT_MULs have been converted to helper calls in morph.cpp
+// All other GT_MULs have been converted to helper calls in earlylower.cpp
 //
 // Arguments:
 //    use - the LIR::Use object for the def that needs to be decomposed.
@@ -1544,7 +1541,6 @@ GenTree* DecomposeLongs::DecomposeMul(LIR::Use& use)
     GenTree* tree = use.Def();
 
     assert(tree->OperIs(GT_MUL));
-    assert(tree->Is64RsltMul());
 
     GenTree* op1 = tree->gtGetOp1();
     GenTree* op2 = tree->gtGetOp2();

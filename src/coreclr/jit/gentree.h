@@ -526,8 +526,6 @@ enum GenTreeFlags : unsigned int
     GTF_ADDRMODE_NO_CSE         = 0x80000000, // GT_ADD/GT_MUL/GT_LSH -- Do not CSE this node only, forms complex
                                               //                         addressing mode
 
-    GTF_MUL_64RSLT              = 0x40000000, // GT_MUL     -- produce 64-bit result
-
     GTF_RELOP_NAN_UN            = 0x80000000, // GT_<relop> -- Is branch taken if ops are NaN?
     GTF_RELOP_JMP_USED          = 0x40000000, // GT_<relop> -- result of compare used for jump or ?:
     GTF_RELOP_QMARK             = 0x20000000, // GT_<relop> -- the node is the condition for ?:
@@ -2139,21 +2137,6 @@ public:
     {
         assert(OperMayOverflow());
         gtFlags &= ~GTF_OVERFLOW;
-    }
-
-    bool Is64RsltMul() const
-    {
-        return (gtFlags & GTF_MUL_64RSLT) != 0;
-    }
-
-    void Set64RsltMul()
-    {
-        gtFlags |= GTF_MUL_64RSLT;
-    }
-
-    void Clear64RsltMul()
-    {
-        gtFlags &= ~GTF_MUL_64RSLT;
     }
 
     void SetAllEffectsFlags(GenTree* source)

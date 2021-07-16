@@ -34,15 +34,19 @@ public:
 
         for (BasicBlock* block : m_compiler->Blocks())
         {
+            m_compiler->compCurBB = block;
+
             for (Statement* stmt : block->Statements())
             {
+                m_compiler->compCurStmt = stmt;
+
                 WalkTree(stmt->GetRootNodePointer(), nullptr);
 
                 if (m_remorphingNeeded)
                 {
                     JITDUMP("\nRemorhing and relinking " FMT_STMT "\n\n", stmt->GetID());
 
-                    m_compiler->fgMorphTree(stmt->GetRootNode());
+                    stmt->SetRootNode(m_compiler->fgMorphTree(stmt->GetRootNode()));
                     m_compiler->fgSetStmtSeq(stmt);
 
                     JITDUMP("Early lowering modified statement:\n");
@@ -53,6 +57,9 @@ public:
                 }
             }
         }
+
+        m_compiler->compCurBB   = nullptr;
+        m_compiler->compCurStmt = nullptr;
 
         return phaseStatus;
     }
@@ -89,6 +96,7 @@ private:
             helper = mul->IsUnsigned() ? CORINFO_HELP_ULMUL_OVF : CORINFO_HELP_LMUL_OVF;
         }
 
+        // TODO-Throughput: stop generating large GT_MUL nodes in the importer.
         GenTreeCall::Use* args = m_compiler->gtNewCallArgs(mul->gtGetOp1(), mul->gtGetOp2());
         GenTreeCall*      call = m_compiler->gtNewHelperCallNode(helper, TYP_LONG, args);
         m_remorphingNeeded     = true;

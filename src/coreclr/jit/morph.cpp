@@ -540,12 +540,6 @@ GenTree* Compiler::fgMorphCast(GenTree* tree)
                     oper->AsOp()->gtOp2 = gtNewCastNode(TYP_INT, oper->AsOp()->gtOp2, false, dstType);
                 }
 
-                // Clear the GT_MUL_64RSLT if it is set.
-                if (oper->gtOper == GT_MUL && (oper->gtFlags & GTF_MUL_64RSLT))
-                {
-                    oper->gtFlags &= ~GTF_MUL_64RSLT;
-                }
-
                 // The operation now produces a 32-bit result.
                 oper->gtType = TYP_INT;
 
@@ -5259,11 +5253,6 @@ void Compiler::fgMoveOpsLeft(GenTree* tree)
             // because any value numbers that we computed for op2
             // will be incorrect after performing a commutative reordering
             //
-            return;
-        }
-
-        if (oper == GT_MUL && (op2->gtFlags & GTF_MUL_64RSLT))
-        {
             return;
         }
 
@@ -12578,7 +12567,6 @@ DONE_MORPHING_CHILDREN:
 
                 if (fgRecognizeLongMul(tree->AsOp()))
                 {
-                    tree->Set64RsltMul();
                     op1->SetDoNotCSE();
                     op2->SetDoNotCSE();
                 }
@@ -14599,120 +14587,20 @@ GenTree* Compiler::fgRecognizeAndMorphBitwiseRotation(GenTree* tree)
 
 #if !defined(TARGET_64BIT)
 //------------------------------------------------------------------------------
-// fgRecognizeAndMorphLongMul : Check for and morph long multiplication with 32 bit operands.
+// fgRecognizeLongMul : Check for long multiplication with 32 bit operands.
 //
-// Recognizes the following tree: MUL(CAST(long <- int) or CONST, CAST(long <- int) or CONST),
-// where CONST must be an integer constant that fits in 32 bits. Note that if both operands are
-// constants, the original tree is returned unmodified, i. e. the caller is responsible for
-// folding or correct code generation (e. g. for overflow cases). May swap operands if the
-// first one is a constant and the second one is not.
+// Recognizes the following tree: MUL(CAST(long <- int), CAST(long <- int) or CONST),
+// where CONST must be an integer constant that fits in 32 bits. Note that if both
+// operands are constants, "false" is returned. May reset the GTF_OVERFLOW (and thus
+// the GTF_EXCEPT) flag if the multiplication is determined not to overflow.
 //
 // Arguments:
 //    mul  -  GT_MUL tree to check for a long multiplication opportunity
 //
 // Return Value:
-//    The original tree unmodified if it is not eligible for long multiplication.
-//    Tree with GTF_MUL_64RSLT set, side effect flags propagated, and children morphed if it is.
+//    "true" if "mul" is eligible for long multiplication.
+//    "false" otherwise.
 //
-GenTreeOp* Compiler::fgRecognizeAndMorphLongMul(GenTreeOp* mul)
-{
-    assert(mul->OperIs(GT_MUL));
-    assert(mul->TypeIs(TYP_LONG));
-
-    GenTree* op1 = mul->gtGetOp1();
-    GenTree* op2 = mul->gtGetOp2();
-
-    assert(op1->TypeIs(TYP_LONG) && op2->TypeIs(TYP_LONG));
-
-    if (!(op1->OperIs(GT_CAST) && genActualTypeIsInt(op1->AsCast()->CastOp())) &&
-        !(op1->IsIntegralConst() && FitsIn<int32_t>(op1->AsIntConCommon()->IntegralValue())))
-    {
-        return mul;
-    }
-
-    if (!(op2->OperIs(GT_CAST) && genActualTypeIsInt(op2->AsCast()->CastOp())) &&
-        !(op2->IsIntegralConst() && FitsIn<int32_t>(op2->AsIntConCommon()->IntegralValue())))
-    {
-        return mul;
-    }
-
-    // Let fgMorphSmpOp take care of folding.
-    if (op1->IsIntegralConst() && op2->IsIntegralConst())
-    {
-        return mul;
-    }
-
-    // We don't handle checked casts.
-    if (op1->gtOverflowEx() || op2->gtOverflowEx())
-    {
-        return mul;
-    }
-
-    // Move the constant operand to the right to make the logic below more straightfoward.
-    if (op2->OperIs(GT_CAST) && op1->IsIntegralConst())
-    {
-        std::swap(op1, op2);
-        mul->gtOp1 = op1;
-        mul->gtOp2 = op2;
-    }
-
-    // The operands must have the same extending behavior, since the instruction
-    // used to compute the result will sign/zero-extend both operands at once.
-    bool op1ZeroExtends = op1->IsUnsigned();
-    bool op2ZeroExtends = op2->OperIs(GT_CAST) ? op2->IsUnsigned() : op2->AsIntConCommon()->IntegralValue() >= 0;
-    bool op2AnyExtensionIsSuitable = op2->IsIntegralConst() && op2ZeroExtends;
-    if ((op1ZeroExtends != op2ZeroExtends) && !op2AnyExtensionIsSuitable)
-    {
-        return mul;
-    }
-
-    if (mul->gtOverflow())
-    {
-        auto getMaxValue = [mul](GenTree* op) -> int64_t {
-            if (op->OperIs(GT_CAST))
-            {
-                if (op->IsUnsigned())
-                {
-                    switch (op->AsCast()->CastOp()->TypeGet())
-                    {
-                        case TYP_UBYTE:
-                            return UINT8_MAX;
-                        case TYP_USHORT:
-                            return UINT16_MAX;
-                        default:
-                            return UINT32_MAX;
-                    }
-                }
-
-                return mul->IsUnsigned() ? static_cast<int64_t>(UINT64_MAX) : INT32_MIN;
-            }
-
-            return op->AsIntConCommon()->IntegralValue();
-        };
-
-        int64_t maxOp1 = getMaxValue(op1);
-        int64_t maxOp2 = getMaxValue(op2);
-
-        if (CheckedOps::MulOverflows(maxOp1, maxOp2, mul->IsUnsigned()))
-        {
-            return mul;
-        }
-
-        mul->ClearOverflow();
-    }
-
-    // MUL_LONG needs to do the work the casts would have done.
-    mul->ClearUnsigned();
-    if (op1->IsUnsigned())
-    {
-        mul->SetUnsigned();
-    }
-
-    mul->Set64RsltMul();
-
-    return fgMorphLongMul(mul);
-}
-
 bool Compiler::fgRecognizeLongMul(GenTreeOp* mul)
 {
     assert(mul->OperIs(GT_MUL));
@@ -14763,7 +14651,14 @@ bool Compiler::fgRecognizeLongMul(GenTreeOp* mul)
             {
                 if (op->IsUnsigned())
                 {
-                    switch (op->AsCast()->CastOp()->TypeGet())
+                    // TODO-Cleanup: use the "extract range from tree" API.
+                    var_types srcType = op->AsCast()->CastOp()->TypeGet();
+                    if (op->AsCast()->CastOp()->OperIs(GT_CAST))
+                    {
+                        srcType = op->AsCast()->CastOp()->AsCast()->CastToType();
+                    }
+
+                    switch (srcType)
                     {
                         case TYP_UBYTE:
                             return UINT8_MAX;
@@ -14799,43 +14694,7 @@ bool Compiler::fgRecognizeLongMul(GenTreeOp* mul)
         mul->SetUnsigned();
     }
 
-    mul->Set64RsltMul();
-
     return true;
-}
-
-//------------------------------------------------------------------------------
-// fgMorphLongMul : Morphs GT_MUL nodes marked with GTF_MUL_64RSLT.
-//
-// Morphs *only* the operands of casts that compose the long mul to
-// avoid them being folded aways.
-//
-// Arguments:
-//    mul  -  GT_MUL tree to morph operands of
-//
-// Return Value:
-//    The original tree, with operands morphed and flags propagated.
-//
-GenTreeOp* Compiler::fgMorphLongMul(GenTreeOp* mul)
-{
-    GenTree* op1 = mul->gtGetOp1();
-    GenTree* op2 = mul->gtGetOp2();
-
-    // Morph the operands. We cannot allow the casts to go away, so we morph their operands directly.
-    op1->AsCast()->CastOp() = fgMorphTree(op1->AsCast()->CastOp());
-    op1->SetAllEffectsFlags(op1->AsCast()->CastOp());
-
-    if (op2->OperIs(GT_CAST))
-    {
-        op2->AsCast()->CastOp() = fgMorphTree(op2->AsCast()->CastOp());
-        op2->SetAllEffectsFlags(op2->AsCast()->CastOp());
-    }
-
-    mul->SetAllEffectsFlags(op1, op2);
-    op1->SetDoNotCSE();
-    op2->SetDoNotCSE();
-
-    return mul;
 }
 #endif // !defined(TARGET_64BIT)
 

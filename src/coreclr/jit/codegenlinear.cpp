@@ -2557,7 +2557,7 @@ void CodeGen::genStoreLongLclVar(GenTree* treeNode)
     }
     else
     {
-        assert((op1->gtSkipReloadOrCopy()->gtFlags & GTF_MUL_64RSLT) != 0);
+        assert(op1->gtSkipReloadOrCopy()->OperIs(GT_MUL_LONG));
         // This is either a multi-reg MUL_LONG, or a multi-reg reload or copy.
         assert(op1->IsMultiRegNode() && (op1->GetMultiRegCount() == 2));
 

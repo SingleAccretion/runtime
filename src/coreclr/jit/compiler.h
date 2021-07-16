@@ -5847,14 +5847,12 @@ private:
     bool fgOperIsBitwiseRotationRoot(genTreeOps oper);
 
 #if !defined(TARGET_64BIT)
-    //                  Recognize and morph a long multiplication with 32 bit operands.
-    GenTreeOp* fgRecognizeAndMorphLongMul(GenTreeOp* mul);
 public:
+    //                  Recognize long multiplication with 32 bit operands.
     bool fgRecognizeLongMul(GenTreeOp* mul);
-private:
-    GenTreeOp* fgMorphLongMul(GenTreeOp* mul);
 #endif
 
+private:
     //-------- Determine the order in which the trees will be evaluated -------
 
     unsigned fgTreeSeqNum;

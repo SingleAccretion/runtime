@@ -9094,10 +9094,6 @@ void cTreeFlags(Compiler* comp, GenTree* tree)
             case GT_MUL_LONG:
 #endif
 
-                if (tree->gtFlags & GTF_MUL_64RSLT)
-                {
-                    chars += printf("[64RSLT]");
-                }
                 if (tree->gtFlags & GTF_ADDRMODE_NO_CSE)
                 {
                     chars += printf("[ADDRMODE_NO_CSE]");

@@ -5216,6 +5216,7 @@ Compiler::fgWalkResult Compiler::optVNConstantPropCurStmt(BasicBlock* block, Sta
         // Make sure we have an R-value.
         case GT_ADD:
         case GT_SUB:
+        case GT_MUL:
         case GT_DIV:
         case GT_MOD:
         case GT_UDIV:
@@ -5243,14 +5244,6 @@ Compiler::fgWalkResult Compiler::optVNConstantPropCurStmt(BasicBlock* block, Sta
             break;
 
         case GT_JTRUE:
-            break;
-
-        case GT_MUL:
-            // Don't transform long multiplies.
-            if (tree->gtFlags & GTF_MUL_64RSLT)
-            {
-                return WALK_SKIP_SUBTREES;
-            }
             break;
 
         case GT_LCL_VAR:
