@@ -51,6 +51,7 @@ public:
 
                     JITDUMP("Early lowering modified statement:\n");
                     DISPSTMT(stmt);
+                    JITDUMP("\n");
 
                     phaseStatus        = PhaseStatus::MODIFIED_EVERYTHING;
                     m_remorphingNeeded = false;

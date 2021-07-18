@@ -4123,6 +4123,40 @@ unsigned Compiler::gtSetEvalOrder(GenTree* tree)
                 }
                 else
                 {
+#if !defined(TARGET_64BIT)
+                    // Note: this code exists to match the previous behavior of
+                    // long multiplication being morphed into helper calls in morph
+                    // as closely as possible. That means:
+                    // 1. No special handling for MUL_LONG candidates on ARM (see #ifdef TARGET_X86 below).
+                    // 2. No distinction between overflow-vs-not-overflow helpers.
+                    // 3. No operand swapping (TODO-CQ).
+                    // It can be tuned better.
+
+                    // We mark potential MUL_LONG's operands with GTF_DONT_CSE in morph.
+                    bool isLongMulCandidate = !tree->AsOp()->gtGetOp1()->CanCSE() &&
+                                              !tree->AsOp()->gtGetOp2()->CanCSE();
+
+                    if (tree->TypeIs(TYP_LONG) && !isLongMulCandidate)
+                    {
+                        CallCostsBuilder costsBuilder(this);
+#if defined(TARGET_X86)
+                        // X86 passes longs on stack.
+                        const bool lateArgs = false;
+#else if defined(TARGET_ARM)
+                        // ARM passes longs in registers.
+                        const bool lateArgs = true;
+#endif
+                        GenTreeCall::Use arg2(op2);
+                        GenTreeCall::Use arg1(op1, &arg2);
+                        GenTreeCall::UseList args(&arg1);
+                        costsBuilder.AddArgs(args, lateArgs);
+                        costsBuilder.AddIsHelperOrUserCall();
+
+                        costsBuilder.Build(&level, &costEx, &costSz);
+                        goto DONE;
+                    }
+#endif // !defined(TARGET_64BIT)
+
                     /* Integer multiplication instructions are more expensive */
                     costEx += 3;
                     costSz += 2;
