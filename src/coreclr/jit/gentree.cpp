@@ -2560,46 +2560,6 @@ unsigned Compiler::gtSetListOrder(GenTree* list, bool isListCallArgs, bool callA
     return nxtlvl;
 }
 
-unsigned Compiler::gtSetCallArgsOrder(const GenTreeCall::UseList& args, bool lateArgs, int* callCostEx, int* callCostSz)
-{
-    unsigned level  = 0;
-    unsigned costEx = 0;
-    unsigned costSz = 0;
-
-    for (GenTreeCall::Use& use : args)
-    {
-        GenTree* argNode  = use.GetNode();
-        unsigned argLevel = gtSetEvalOrder(argNode);
-
-        if (argLevel > level)
-        {
-            level = argLevel;
-        }
-
-        if (argNode->GetCostEx() != 0)
-        {
-            costEx += argNode->GetCostEx();
-            costEx += lateArgs ? 0 : IND_COST_EX;
-        }
-
-        if (argNode->GetCostSz() != 0)
-        {
-            costSz += argNode->GetCostSz();
-#ifdef TARGET_XARCH
-            if (lateArgs) // push is smaller than mov to reg
-#endif
-            {
-                costSz += 1;
-            }
-        }
-    }
-
-    *callCostEx += costEx;
-    *callCostSz += costSz;
-
-    return level;
-}
-
 //-----------------------------------------------------------------------------
 // gtWalkOp: Traverse and mark an address expression
 //
@@ -3206,6 +3166,131 @@ bool Compiler::gtMarkAddrMode(GenTree* addr, int* pCostEx, int* pCostSz, var_typ
  *      3. Sometimes sets GTF_ADDRMODE_NO_CSE on nodes in the tree.
  *      4. DEBUG-only: clears GTF_DEBUG_NODE_MORPHED.
  */
+
+ // Helper class used to compute costs for calls and call-like nodes.
+ //
+ // Because calls are complex, this utilizes a "builder pattern", where
+ // the class is instantiated, and "parts" are added as needed.
+class CallCostsBuilder
+{
+private:
+    Compiler* m_compiler;
+    unsigned  m_level;
+    int       m_costEx;
+    int       m_costSz;
+
+    INDEBUG(bool m_typeAdded = false);
+
+public:
+    CallCostsBuilder(Compiler* compiler) : m_compiler(compiler)
+        , m_level(0)
+        , m_costEx(5)
+        , m_costSz(2)
+    {
+    }
+
+    void AddThisArg(GenTree* thisArg)
+    {
+        unsigned level = m_compiler->gtSetEvalOrder(thisArg);
+
+        m_level = max(m_level, level);
+        m_costEx += thisArg->GetCostEx();
+        m_costSz += thisArg->GetCostSz() + 1;
+    }
+
+    void AddArgs(const GenTreeCall::UseList& args, bool lateArgs)
+    {
+        for (GenTreeCall::Use& use : args)
+        {
+            GenTree* argNode  = use.GetNode();
+            unsigned argLevel = m_compiler->gtSetEvalOrder(argNode);
+
+            m_level = max(m_level, argLevel);
+
+            if (argNode->GetCostEx() != 0)
+            {
+                m_costEx += argNode->GetCostEx();
+                m_costEx += lateArgs ? 0 : IND_COST_EX;
+            }
+
+            if (argNode->GetCostSz() != 0)
+            {
+                m_costSz += argNode->GetCostSz();
+#ifdef TARGET_XARCH
+                if (lateArgs) // push is smaller than mov to reg
+#endif
+                {
+                    m_costSz += 1;
+                }
+            }
+        }
+    }
+
+    void AddIsIndirectCall(GenTree* address)
+    {
+        assert(!m_typeAdded);
+
+        unsigned level = m_compiler->gtSetEvalOrder(address);
+
+        m_level = max(m_level, level);
+        m_costEx += address->GetCostEx() + IND_COST_EX;
+        m_costSz += address->GetCostSz();
+
+        INDEBUG(m_typeAdded = true);
+    }
+
+    void AddIsHelperOrUserCall(bool isVirtualStub = false, bool indirectThroughRelativeAddress = false)
+    {
+        assert(!m_typeAdded);
+#if defined(TARGET_ARM)
+        if (isVirtualStub)
+        {
+            // We generate movw/movt/ldr
+            m_costEx += (1 + IND_COST_EX);
+            m_costSz += 8;
+            if (indirectThroughRelativeAddress)
+            {
+                // Must use R12 for the ldr target -- REG_JUMP_THUNK_PARAM
+                m_costSz += 2;
+            }
+        }
+        else if (!m_compiler->opts.jitFlags->IsSet(JitFlags::JIT_FLAG_PREJIT))
+        {
+            m_costEx += 2;
+            m_costSz += 6;
+        }
+        m_costSz += 2;
+#else if defined(TARGET_XARCH)
+        m_costSz += 3;
+#endif
+        INDEBUG(m_typeAdded = true);
+    }
+
+    void AddIsVirtual(GenTree* controlExpr)
+    {
+        if (controlExpr != nullptr)
+        {
+            unsigned level = m_compiler->gtSetEvalOrder(controlExpr);
+
+            m_level = max(m_level, level);
+            m_costEx += controlExpr->GetCostEx();
+            m_costSz += controlExpr->GetCostSz();
+        }
+
+        m_costEx += 2 * IND_COST_EX;
+        m_costSz += 2;
+    }
+
+    void Build(unsigned* level, int* costEx, int* costSz)
+    {
+        m_level += 6;
+        m_costEx += 3 * IND_COST_EX;
+
+        *level  = m_level;
+        *costEx = m_costEx;
+        *costSz = m_costSz;
+    }
+};
 
 #ifdef _PREFAST_
 #pragma warning(push)
@@ -4454,126 +4539,56 @@ unsigned Compiler::gtSetEvalOrder(GenTree* tree)
         unsigned lvl2; // Scratch variable
 
         case GT_CALL:
-
+        {
             assert(tree->gtFlags & GTF_CALL);
 
-            level  = 0;
-            costEx = 5;
-            costSz = 2;
+            CallCostsBuilder callCostsBuilder(this);
+            GenTreeCall* call = tree->AsCall();
 
-            GenTreeCall* call;
-            call = tree->AsCall();
-
-            /* Evaluate the 'this' argument, if present */
-
+            // Evaluate the 'this' argument, if present.
             if (tree->AsCall()->gtCallThisArg != nullptr)
             {
-                GenTree* thisVal = tree->AsCall()->gtCallThisArg->GetNode();
-
-                lvl2 = gtSetEvalOrder(thisVal);
-                if (level < lvl2)
-                {
-                    level = lvl2;
-                }
-                costEx += thisVal->GetCostEx();
-                costSz += thisVal->GetCostSz() + 1;
+                callCostsBuilder.AddThisArg(call->gtCallThisArg->GetNode());
             }
 
-            /* Evaluate the arguments, right to left */
-
+            // Evaluate the arguments, right to left.
             if (call->gtCallArgs != nullptr)
             {
                 const bool lateArgs = false;
-                lvl2                = gtSetCallArgsOrder(call->Args(), lateArgs, &costEx, &costSz);
-                if (level < lvl2)
-                {
-                    level = lvl2;
-                }
+                callCostsBuilder.AddArgs(call->Args(), lateArgs);
             }
 
-            /* Evaluate the temp register arguments list
-             * This is a "hidden" list and its only purpose is to
-             * extend the life of temps until we make the call */
-
+            // Evaluate the temp register arguments list
+            // This is a "hidden" list and its only purpose is to
+            // extend the life of temps until we make the call.
             if (call->gtCallLateArgs != nullptr)
             {
                 const bool lateArgs = true;
-                lvl2                = gtSetCallArgsOrder(call->LateArgs(), lateArgs, &costEx, &costSz);
-                if (level < lvl2)
-                {
-                    level = lvl2;
-                }
+                callCostsBuilder.AddArgs(call->LateArgs(), lateArgs);
             }
 
             if (call->gtCallType == CT_INDIRECT)
             {
-                // pinvoke-calli cookie is a constant, or constant indirection
-                assert(call->gtCallCookie == nullptr || call->gtCallCookie->gtOper == GT_CNS_INT ||
-                       call->gtCallCookie->gtOper == GT_IND);
+                // pinvoke-calli cookie is a constant, or constant indirection.
+                assert((call->gtCallCookie == nullptr) || call->gtCallCookie->OperIs(GT_CNS_INT) ||
+                        call->gtCallCookie->OperIs(GT_IND));
 
-                GenTree* indirect = call->gtCallAddr;
-
-                lvl2 = gtSetEvalOrder(indirect);
-                if (level < lvl2)
-                {
-                    level = lvl2;
-                }
-                costEx += indirect->GetCostEx() + IND_COST_EX;
-                costSz += indirect->GetCostSz();
+                callCostsBuilder.AddIsIndirectCall(call->gtCallAddr);
             }
             else
             {
+                callCostsBuilder.AddIsHelperOrUserCall(call->IsVirtualStub(),
+                                                      (call->gtCallMoreFlags & GTF_CALL_M_VIRTSTUB_REL_INDIRECT) != 0);
+
                 if (call->IsVirtual())
                 {
-                    GenTree* controlExpr = call->gtControlExpr;
-                    if (controlExpr != nullptr)
-                    {
-                        lvl2 = gtSetEvalOrder(controlExpr);
-                        if (level < lvl2)
-                        {
-                            level = lvl2;
-                        }
-                        costEx += controlExpr->GetCostEx();
-                        costSz += controlExpr->GetCostSz();
-                    }
+                    callCostsBuilder.AddIsVirtual(call->gtControlExpr);
                 }
-#ifdef TARGET_ARM
-                if (call->IsVirtualStub())
-                {
-                    // We generate movw/movt/ldr
-                    costEx += (1 + IND_COST_EX);
-                    costSz += 8;
-                    if (call->gtCallMoreFlags & GTF_CALL_M_VIRTSTUB_REL_INDIRECT)
-                    {
-                        // Must use R12 for the ldr target -- REG_JUMP_THUNK_PARAM
-                        costSz += 2;
-                    }
-                }
-                else if (!opts.jitFlags->IsSet(JitFlags::JIT_FLAG_PREJIT))
-                {
-                    costEx += 2;
-                    costSz += 6;
-                }
-                costSz += 2;
-#endif
-
-#ifdef TARGET_XARCH
-                costSz += 3;
-#endif
             }
 
-            level += 1;
-
-            /* Virtual calls are a bit more expensive */
-            if (call->IsVirtual())
-            {
-                costEx += 2 * IND_COST_EX;
-                costSz += 2;
-            }
-
-            level += 5;
-            costEx += 3 * IND_COST_EX;
-            break;
+            callCostsBuilder.Build(&level, &costEx, &costSz);
+        }
+        break;
 
         case GT_ARR_ELEM:
         {
