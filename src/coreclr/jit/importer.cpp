@@ -12652,7 +12652,7 @@ void Compiler::impImportBlockCode(BasicBlock* block)
 
             case CEE_MUL:
                 oper = GT_MUL;
-                goto MATH_MAYBE_CALL_NO_OVF;
+                goto MATH_OP2;
 
             case CEE_MUL_OVF:
                 uns = false;
@@ -12662,9 +12662,10 @@ void Compiler::impImportBlockCode(BasicBlock* block)
                 goto MUL_OVF;
 
             MUL_OVF:
-                ovfl = true;
+                ovfl     = true;
+                callNode = false;
                 oper = GT_MUL;
-                goto MATH_MAYBE_CALL_OVF;
+                goto MATH_OP2_FLAGS;
 
             // Other binary math operations
 
@@ -12686,7 +12687,7 @@ void Compiler::impImportBlockCode(BasicBlock* block)
 
             MATH_MAYBE_CALL_NO_OVF:
                 ovfl = false;
-            MATH_MAYBE_CALL_OVF:
+
                 // Morpher has some complex logic about when to turn different
                 // typed nodes on different platforms into helper calls. We
                 // need to either duplicate that logic here, or just
@@ -12789,7 +12790,6 @@ void Compiler::impImportBlockCode(BasicBlock* block)
                 {
                     /* These operators can later be transformed into 'GT_CALL' */
 
-                    assert(GenTree::s_gtNodeSizes[GT_CALL] > GenTree::s_gtNodeSizes[GT_MUL]);
 #ifndef TARGET_ARM
                     assert(GenTree::s_gtNodeSizes[GT_CALL] > GenTree::s_gtNodeSizes[GT_DIV]);
                     assert(GenTree::s_gtNodeSizes[GT_CALL] > GenTree::s_gtNodeSizes[GT_UDIV]);
