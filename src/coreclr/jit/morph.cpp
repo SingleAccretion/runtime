@@ -11180,40 +11180,6 @@ GenTree* Compiler::fgMorphSmpOp(GenTree* tree, MorphAddrContext* mac)
                     }
                 }
             }
-
-#ifndef TARGET_64BIT
-            if (typ == TYP_LONG)
-            {
-                helper = CORINFO_HELP_LDIV;
-                goto USE_HELPER_FOR_ARITH;
-            }
-
-#if USE_HELPERS_FOR_INT_DIV
-            if (typ == TYP_INT)
-            {
-                helper = CORINFO_HELP_DIV;
-                goto USE_HELPER_FOR_ARITH;
-            }
-#endif
-#endif // !TARGET_64BIT
-            break;
-
-        case GT_UDIV:
-
-#ifndef TARGET_64BIT
-            if (typ == TYP_LONG)
-            {
-                helper = CORINFO_HELP_ULDIV;
-                goto USE_HELPER_FOR_ARITH;
-            }
-#if USE_HELPERS_FOR_INT_DIV
-            if (typ == TYP_INT)
-            {
-                helper = CORINFO_HELP_UDIV;
-                goto USE_HELPER_FOR_ARITH;
-            }
-#endif
-#endif // TARGET_64BIT
             break;
 
         case GT_MOD:

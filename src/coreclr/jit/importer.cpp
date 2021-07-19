@@ -12671,7 +12671,7 @@ void Compiler::impImportBlockCode(BasicBlock* block)
 
             case CEE_DIV:
                 oper = GT_DIV;
-                goto MATH_MAYBE_CALL_NO_OVF;
+                goto MATH_OP2;
 
             case CEE_DIV_UN:
                 oper = GT_UDIV;

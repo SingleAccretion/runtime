@@ -69,13 +69,32 @@ public:
     {
         GenTree* tree = *use;
 
+        CorInfoHelpFunc helper = CORINFO_HELP_UNDEF;
         switch (tree->OperGet())
         {
 #if !defined(TARGET_64BIT)
             case GT_MUL:
                 if (tree->TypeIs(TYP_LONG) && !m_compiler->fgRecognizeLongMul(tree->AsOp()))
                 {
-                    *use = LowerMulIntoHelpers(tree->AsOp());
+                    helper = CORINFO_HELP_LMUL;
+                    if (tree->gtOverflow())
+                    {
+                        helper = tree->IsUnsigned() ? CORINFO_HELP_ULMUL_OVF : CORINFO_HELP_LMUL_OVF;
+                    }
+                }
+                break;
+
+            case GT_DIV:
+            case GT_UDIV:
+#if USE_HELPERS_FOR_INT_DIV
+                if (tree->TypeIs(TYP_INT))
+                {
+                    helper = tree->OperIs(GT_DIV) ? CORINFO_HELP_DIV : CORINFO_HELP_UDIV;
+                }
+#endif
+                if (tree->TypeIs(TYP_LONG))
+                {
+                    helper = tree->OperIs(GT_DIV) ? CORINFO_HELP_LDIV : CORINFO_HELP_ULDIV;
                 }
                 break;
 #endif // !defined(TARGET_64BIT)
@@ -84,32 +103,28 @@ public:
                 break;
         }
 
+        if (helper != CORINFO_HELP_UNDEF)
+        {
+            *use = LowerIntoHelper(tree->AsOp(), helper);
+        }
+
         return fgWalkResult::WALK_CONTINUE;
     }
 
 private:
-#if !defined(TARGET_64BIT)
-    GenTree* LowerMulIntoHelpers(GenTreeOp* mul)
+    GenTree* LowerIntoHelper(GenTreeOp* tree, CorInfoHelpFunc helper)
     {
-        CorInfoHelpFunc helper = CORINFO_HELP_LMUL;
-        if (mul->gtOverflow())
-        {
-            helper = mul->IsUnsigned() ? CORINFO_HELP_ULMUL_OVF : CORINFO_HELP_LMUL_OVF;
-        }
-
-        // TODO-Throughput: stop generating large GT_MUL nodes in the importer.
-        GenTreeCall::Use* args = m_compiler->gtNewCallArgs(mul->gtGetOp1(), mul->gtGetOp2());
+        GenTreeCall::Use* args = m_compiler->gtNewCallArgs(tree->gtGetOp1(), tree->gtGetOp2());
         GenTreeCall*      call = m_compiler->gtNewHelperCallNode(helper, TYP_LONG, args);
         m_remorphingNeeded     = true;
 
-        JITDUMP("Replacing GT_MUL:\n");
-        DISPNODE(mul);
+        JITDUMP("Replacing GT_%s:\n", GenTree::OpName(tree->OperGet()));
+        DISPNODE(tree);
         JITDUMP("With a call to helper:\n");
         DISPNODE(call);
 
         return call;
     }
-#endif // !defined(TARGET_64BIT)
 };
 
 PhaseStatus Compiler::fgEarlyLowering()
