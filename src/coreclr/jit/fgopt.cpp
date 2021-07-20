@@ -5952,12 +5952,11 @@ unsigned Compiler::fgMeasureIR()
         {
             for (Statement* const stmt : block->Statements())
             {
-                fgWalkTreePre(stmt->GetRootNodePointer(),
-                              [](GenTree** slot, fgWalkData* data) -> Compiler::fgWalkResult {
-                                  (*reinterpret_cast<unsigned*>(data->pCallbackData))++;
-                                  return Compiler::WALK_CONTINUE;
-                              },
-                              &nodeCount);
+                fgWalkTreePre(stmt->GetRootNodePointer(), [&nodeCount](GenTree** use, GenTree* user)
+                {
+                    nodeCount++;
+                    return WALK_CONTINUE;
+                });
             }
         }
         else

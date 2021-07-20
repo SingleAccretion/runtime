@@ -2453,57 +2453,10 @@ inline bool Compiler::compCanEncodePtrArgCntMax()
  *  computeStack - true if we want to make stack visible to callback function
  */
 
-inline Compiler::fgWalkResult Compiler::fgWalkTreePre(
-    GenTree** pTree, fgWalkPreFn* visitor, void* callBackData, bool lclVarsOnly, bool computeStack)
-
+template <TreeWalkOptions Options, typename TVisitor, typename... TUserArgs>
+inline Compiler::fgWalkResult Compiler::fgWalkTreePre(GenTree** use, TVisitor&& visitor, TUserArgs... userArgs)
 {
-    fgWalkData walkData;
-
-    walkData.compiler      = this;
-    walkData.wtprVisitorFn = visitor;
-    walkData.pCallbackData = callBackData;
-    walkData.parent        = nullptr;
-    walkData.wtprLclsOnly  = lclVarsOnly;
-#ifdef DEBUG
-    walkData.printModified = false;
-#endif
-
-    fgWalkResult result;
-    if (lclVarsOnly && computeStack)
-    {
-        GenericTreeWalker<true, true, false, true, true> walker(&walkData);
-        result = walker.WalkTree(pTree, nullptr);
-    }
-    else if (lclVarsOnly)
-    {
-        GenericTreeWalker<false, true, false, true, true> walker(&walkData);
-        result = walker.WalkTree(pTree, nullptr);
-    }
-    else if (computeStack)
-    {
-        GenericTreeWalker<true, true, false, false, true> walker(&walkData);
-        result = walker.WalkTree(pTree, nullptr);
-    }
-    else
-    {
-        GenericTreeWalker<false, true, false, false, true> walker(&walkData);
-        result = walker.WalkTree(pTree, nullptr);
-    }
-
-#ifdef DEBUG
-    if (verbose && walkData.printModified)
-    {
-        gtDispTree(*pTree);
-    }
-#endif
-
-    return result;
-}
-
-template <TreeWalkOptions Options, typename TVisitor>
-inline Compiler::fgWalkResult Compiler::fgWalkTreePre(GenTree** pTree, TVisitor&& visitor)
-{
-    class PreOrderTreeVisitor final : public GenTreeVisitor<PreOrderTreeVisitor>
+    class PreOrderTreeVisitor final : public GenTreeVisitor<PreOrderTreeVisitor, TUserArgs...>
     {
     private:
         TVisitor m_visitor;
@@ -2515,20 +2468,38 @@ inline Compiler::fgWalkResult Compiler::fgWalkTreePre(GenTree** pTree, TVisitor&
             DoLclVarsOnly = (Options & TreeWalkOptions::DoLclVarsOnly) != TreeWalkOptions::None
         };
 
-        PreOrderTreeVisitor(Compiler* compiler, TVisitor&& visitor) : GenTreeVisitor<PreOrderTreeVisitor>(compiler)
+        PreOrderTreeVisitor(Compiler* compiler, TVisitor&& visitor)
+            : GenTreeVisitor<PreOrderTreeVisitor, TUserArgs...>(compiler)
             , m_visitor{std::forward<TVisitor>(visitor)}
         {
         }
 
-        Compiler::fgWalkResult PreOrderVisit(GenTree** use, GenTree* user)
+        Compiler::fgWalkResult PreOrderVisit(GenTree** use, GenTree* user, TUserArgs... userArgs)
         {
-            return m_visitor(use, user);
+            return m_visitor(use, user, userArgs...);
         }
     };
 
     PreOrderTreeVisitor walker(this, std::forward<TVisitor>(visitor));
 
-    return walker.WalkTree(pTree, nullptr);
+    return walker.WalkTree(use, nullptr, userArgs...);
+}
+
+/*****************************************************************************
+*
+*  Walk all basic blocks and call the given visitor for all tree
+*  nodes contained therein.
+*/
+template <TreeWalkOptions Options, typename TVisitor, typename... TUserArgs>
+inline void Compiler::fgWalkAllTreesPre(TVisitor&& visitor, TUserArgs... userArgs)
+{
+    for (BasicBlock* const block : Blocks())
+    {
+        for (Statement* const stmt : block->Statements())
+        {
+            fgWalkTreePre<Options>(stmt->GetRootNodePointer(), std::forward<TVisitor>(visitor), userArgs...);
+        }
+    }
 }
 
 /*****************************************************************************
@@ -3590,17 +3561,6 @@ inline CorInfoHelpFunc Compiler::eeGetHelperNum(CORINFO_METHOD_HANDLE method)
         return (CORINFO_HELP_UNDEF);
     }
     return ((CorInfoHelpFunc)(((size_t)method) >> 2));
-}
-
-inline Compiler::fgWalkResult Compiler::CountSharedStaticHelper(GenTree** pTree, fgWalkData* data)
-{
-    if (Compiler::IsSharedStaticHelper(*pTree))
-    {
-        int* pCount = (int*)data->pCallbackData;
-        (*pCount)++;
-    }
-
-    return WALK_CONTINUE;
 }
 
 //  TODO-Cleanup: Replace calls to IsSharedStaticHelper with new HelperCallProperties

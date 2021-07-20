@@ -96,13 +96,12 @@ struct MarkPtrsInfo
  * or indirection node.  It starts a new tree walk for it's subtrees when the state
  * changes.
  */
-Compiler::fgWalkResult Compiler::gsMarkPtrsAndAssignGroups(GenTree** pTree, fgWalkData* data)
+Compiler::fgWalkResult Compiler::gsMarkPtrsAndAssignGroups(GenTree** use, GenTree* user, MarkPtrsInfo* pState)
 {
-    struct MarkPtrsInfo* pState        = (MarkPtrsInfo*)data->pCallbackData;
-    struct MarkPtrsInfo  newState      = *pState;
-    Compiler*            comp          = data->compiler;
-    GenTree*             tree          = *pTree;
-    ShadowParamVarInfo*  shadowVarInfo = pState->comp->gsShadowVarInfo;
+    MarkPtrsInfo        newState      = *pState;
+    Compiler*           comp          = pState->comp;
+    GenTree*            tree          = *use;
+    ShadowParamVarInfo* shadowVarInfo = comp->gsShadowVarInfo;
     assert(shadowVarInfo);
 
     assert(!pState->isAssignSrc || pState->lvAssignDef != (unsigned)-1);
@@ -127,7 +126,7 @@ Compiler::fgWalkResult Compiler::gsMarkPtrsAndAssignGroups(GenTree** pTree, fgWa
             newState.isUnderIndir = true;
             {
                 newState.skipNextNode = true; // Don't have to worry about which kind of node we're dealing with
-                comp->fgWalkTreePre(&tree, comp->gsMarkPtrsAndAssignGroups, (void*)&newState);
+                comp->fgWalkTreePre(&tree, comp->gsMarkPtrsAndAssignGroups, &newState);
             }
 
             return WALK_SKIP_SUBTREES;
@@ -195,16 +194,16 @@ Compiler::fgWalkResult Compiler::gsMarkPtrsAndAssignGroups(GenTree** pTree, fgWa
                 {
                     newState.isUnderIndir = true;
                     comp->fgWalkTreePre(&tree->AsCall()->gtCallThisArg->NodeRef(), gsMarkPtrsAndAssignGroups,
-                                        (void*)&newState);
+                                        &newState);
                 }
 
                 for (GenTreeCall::Use& use : tree->AsCall()->Args())
                 {
-                    comp->fgWalkTreePre(&use.NodeRef(), gsMarkPtrsAndAssignGroups, (void*)&newState);
+                    comp->fgWalkTreePre(&use.NodeRef(), gsMarkPtrsAndAssignGroups, &newState);
                 }
                 for (GenTreeCall::Use& use : tree->AsCall()->LateArgs())
                 {
-                    comp->fgWalkTreePre(&use.NodeRef(), gsMarkPtrsAndAssignGroups, (void*)&newState);
+                    comp->fgWalkTreePre(&use.NodeRef(), gsMarkPtrsAndAssignGroups, &newState);
                 }
 
                 if (tree->AsCall()->gtCallType == CT_INDIRECT)
@@ -214,7 +213,7 @@ Compiler::fgWalkResult Compiler::gsMarkPtrsAndAssignGroups(GenTree** pTree, fgWa
                     // A function pointer is treated like a write-through pointer since
                     // it controls what code gets executed, and so indirectly can cause
                     // a write to memory.
-                    comp->fgWalkTreePre(&tree->AsCall()->gtCallAddr, gsMarkPtrsAndAssignGroups, (void*)&newState);
+                    comp->fgWalkTreePre(&tree->AsCall()->gtCallAddr, gsMarkPtrsAndAssignGroups, &newState);
                 }
             }
             return WALK_SKIP_SUBTREES;
@@ -224,7 +223,7 @@ Compiler::fgWalkResult Compiler::gsMarkPtrsAndAssignGroups(GenTree** pTree, fgWa
             // We'll assume p in "**p = " can be vulnerable because by changing 'p', someone
             // could control where **p stores to.
             {
-                comp->fgWalkTreePre(&tree->AsOp()->gtOp1, comp->gsMarkPtrsAndAssignGroups, (void*)&newState);
+                comp->fgWalkTreePre(&tree->AsOp()->gtOp1, comp->gsMarkPtrsAndAssignGroups, &newState);
             }
             return WALK_SKIP_SUBTREES;
 
@@ -236,7 +235,7 @@ Compiler::fgWalkResult Compiler::gsMarkPtrsAndAssignGroups(GenTree** pTree, fgWa
             // Assignments - track assign groups and *p defs.
 
             // Walk dst side
-            comp->fgWalkTreePre(&dst, comp->gsMarkPtrsAndAssignGroups, (void*)&newState);
+            comp->fgWalkTreePre(&dst, comp->gsMarkPtrsAndAssignGroups, &newState);
 
             // Now handle src side
             if (dst->OperIs(GT_LCL_VAR, GT_LCL_FLD))
@@ -246,7 +245,7 @@ Compiler::fgWalkResult Compiler::gsMarkPtrsAndAssignGroups(GenTree** pTree, fgWa
                 newState.isAssignSrc = true;
             }
 
-            comp->fgWalkTreePre(&src, comp->gsMarkPtrsAndAssignGroups, (void*)&newState);
+            comp->fgWalkTreePre(&src, comp->gsMarkPtrsAndAssignGroups, &newState);
             assert(dst == asg->gtGetOp1());
             assert(src == asg->gtGetOp2());
 
@@ -272,7 +271,7 @@ bool Compiler::gsFindVulnerableParams()
     MarkPtrsInfo info;
 
     info.comp         = this;
-    info.lvAssignDef  = (unsigned)-1;
+    info.lvAssignDef  = BAD_VAR_NUM;
     info.isUnderIndir = false;
     info.isAssignSrc  = false;
     info.skipNextNode = false;
@@ -432,62 +431,39 @@ void Compiler::gsParamsToShadows()
         gsShadowVarInfo[lclNum].shadowCopy = shadowVarNum;
     }
 
-    class ReplaceShadowParamsVisitor final : public GenTreeVisitor<ReplaceShadowParamsVisitor>
+    // Walk the locals of the method (i.e. GT_LCL_FLD and GT_LCL_VAR nodes) and replace the ones that correspond to
+    // "vulnerable" parameters with their shadow copies. If an original local variable has small type then replace
+    // the GT_LCL_VAR node type with TYP_INT.
+    fgWalkAllTreesPre<TreeWalkOptions::DoLclVarsOnly>([this](GenTree** use, GenTree* user)
     {
-        // Walk the locals of the method (i.e. GT_LCL_FLD and GT_LCL_VAR nodes) and replace the ones that correspond to
-        // "vulnerable" parameters with their shadow copies. If an original local variable has small type then replace
-        // the GT_LCL_VAR node type with TYP_INT.
-    public:
-        enum
+        GenTree* tree = *use;
+
+        unsigned int lclNum       = tree->AsLclVarCommon()->GetLclNum();
+        unsigned int shadowLclNum = gsShadowVarInfo[lclNum].shadowCopy;
+
+        if (shadowLclNum != NO_SHADOW_COPY)
         {
-            DoPreOrder    = true,
-            DoLclVarsOnly = true
-        };
+            LclVarDsc* varDsc = lvaGetDesc(lclNum);
+            assert(ShadowParamVarInfo::mayNeedShadowCopy(varDsc));
 
-        ReplaceShadowParamsVisitor(Compiler* compiler) : GenTreeVisitor<ReplaceShadowParamsVisitor>(compiler)
-        {
-        }
+            tree->AsLclVarCommon()->SetLclNum(shadowLclNum);
 
-        Compiler::fgWalkResult PreOrderVisit(GenTree** use, GenTree* user)
-        {
-            GenTree* tree = *use;
-
-            unsigned int lclNum       = tree->AsLclVarCommon()->GetLclNum();
-            unsigned int shadowLclNum = m_compiler->gsShadowVarInfo[lclNum].shadowCopy;
-
-            if (shadowLclNum != NO_SHADOW_COPY)
+            if (varTypeIsSmall(varDsc->TypeGet()))
             {
-                LclVarDsc* varDsc = m_compiler->lvaGetDesc(lclNum);
-                assert(ShadowParamVarInfo::mayNeedShadowCopy(varDsc));
-
-                tree->AsLclVarCommon()->SetLclNum(shadowLclNum);
-
-                if (varTypeIsSmall(varDsc->TypeGet()))
+                if (tree->OperIs(GT_LCL_VAR))
                 {
-                    if (tree->OperIs(GT_LCL_VAR))
-                    {
-                        tree->gtType = TYP_INT;
+                    tree->gtType = TYP_INT;
 
-                        if (user->OperIs(GT_ASG) && user->gtGetOp1() == tree)
-                        {
-                            user->gtType = TYP_INT;
-                        }
+                    if (user->OperIs(GT_ASG) && user->gtGetOp1() == tree)
+                    {
+                        user->gtType = TYP_INT;
                     }
                 }
             }
-
-            return WALK_CONTINUE;
         }
-    };
 
-    for (BasicBlock* const block : Blocks())
-    {
-        for (Statement* const stmt : block->Statements())
-        {
-            ReplaceShadowParamsVisitor replaceShadowParamsVisitor(this);
-            replaceShadowParamsVisitor.WalkTree(stmt->GetRootNodePointer(), nullptr);
-        }
-    }
+        return WALK_CONTINUE;
+    });
 
     // Now insert code to copy the params to their shadow copy.
     for (UINT lclNum = 0; lclNum < lvaOldCount; lclNum++)

@@ -127,7 +127,7 @@ PhaseStatus Compiler::fgInline()
             // In debug builds we want the inline tree to show all failed
             // inlines. Some inlines may fail very early and never make it to
             // candidate stage. So scan the tree looking for those early failures.
-            fgWalkTreePre(stmt->GetRootNodePointer(), fgFindNonInlineCandidate, stmt);
+            fgWalkTreePre(stmt->GetRootNodePointer(), fgFindNonInlineCandidate, this, stmt);
 #endif
 
             GenTree* expr = stmt->GetRootNode();
@@ -241,8 +241,10 @@ PhaseStatus Compiler::fgInline()
 // that is not an inline candidate is noted as a failed inline.
 //
 // Arguments:
-//    pTree - pointer to pointer tree node being walked
-//    data  - contextual data for the walk
+//    use      - pointer to pointer tree node being walked
+//    user     - parent of the tree being walked
+//    compiler - the Compiler context
+//    stmt     - statement the tree belongs to
 //
 // Return Value:
 //    walk result
@@ -250,16 +252,12 @@ PhaseStatus Compiler::fgInline()
 // Note:
 //    Invokes fgNoteNonInlineCandidate on the nodes it finds.
 
-Compiler::fgWalkResult Compiler::fgFindNonInlineCandidate(GenTree** pTree, fgWalkData* data)
+Compiler::fgWalkResult Compiler::fgFindNonInlineCandidate(GenTree** use, GenTree* user, Compiler* compiler, Statement* stmt)
 {
-    GenTree* tree = *pTree;
-    if (tree->gtOper == GT_CALL)
+    GenTree* tree = *use;
+    if (tree->IsCall())
     {
-        Compiler*    compiler = data->compiler;
-        Statement*   stmt     = (Statement*)data->pCallbackData;
-        GenTreeCall* call     = tree->AsCall();
-
-        compiler->fgNoteNonInlineCandidate(stmt, call);
+        compiler->fgNoteNonInlineCandidate(stmt, tree->AsCall());
     }
     return WALK_CONTINUE;
 }
@@ -841,16 +839,16 @@ Compiler::fgWalkResult Compiler::fgLateDevirtualization(GenTree** pTree, fgWalkD
  */
 
 /* static */
-Compiler::fgWalkResult Compiler::fgDebugCheckInlineCandidates(GenTree** pTree, fgWalkData* data)
+Compiler::fgWalkResult Compiler::fgDebugCheckInlineCandidates(GenTree** use, GenTree* user)
 {
-    GenTree* tree = *pTree;
-    if (tree->gtOper == GT_CALL)
+    GenTree* tree = *use;
+    if (tree->IsCall())
     {
         assert((tree->gtFlags & GTF_CALL_INLINE_CANDIDATE) == 0);
     }
     else
     {
-        assert(tree->gtOper != GT_RET_EXPR);
+        assert(!tree->OperIs(GT_RET_EXPR));
     }
 
     return WALK_CONTINUE;

@@ -1656,9 +1656,14 @@ void fgArgInfo::ArgsComplete()
                     {
                         assert(compiler->compLocallocUsed);
 
-                        // Returns WALK_ABORT if a GT_LCLHEAP node is encountered in the argx tree
-                        //
-                        if (compiler->fgWalkTreePre(&argx, Compiler::fgChkLocAllocCB) == Compiler::WALK_ABORT)
+                        // TODO-TreeVisiting: helper for "do we have these nodes in the tree?".
+                        Compiler::fgWalkResult walkResult = compiler->fgWalkTreePre(&argx,
+                        [](GenTree** use, GenTree* user)
+                        {
+                            return (*use)->OperIs(GT_LCLHEAP) ? Compiler::WALK_ABORT : Compiler::WALK_CONTINUE;
+                        });
+
+                        if (walkResult == Compiler::WALK_ABORT)
                         {
                             curArgTabEntry->needTmp = true;
                             needsTemps              = true;
@@ -1669,9 +1674,13 @@ void fgArgInfo::ArgsComplete()
                 }
                 if (hasStructRegArgWeCareAbout)
                 {
-                    // Returns true if a GT_QMARK node is encountered in the argx tree
-                    //
-                    if (compiler->fgWalkTreePre(&argx, Compiler::fgChkQmarkCB) == Compiler::WALK_ABORT)
+                    // TODO-TreeVisiting: helper for "do we have these nodes in the tree?".
+                    Compiler::fgWalkResult walkResult = compiler->fgWalkTreePre(&argx, [](GenTree** use, GenTree* user)
+                    {
+                        return (*use)->OperIs(GT_QMARK) ? Compiler::WALK_ABORT : Compiler::WALK_CONTINUE;
+                    });
+
+                    if (walkResult == Compiler::WALK_ABORT)
                     {
                         curArgTabEntry->needTmp = true;
                         needsTemps              = true;
@@ -16408,22 +16417,16 @@ GenTree* Compiler::fgInitThisClass()
 #ifdef DEBUG
 /*****************************************************************************
  *
- *  Tree walk callback to make sure no GT_QMARK nodes are present in the tree,
- *  except for the allowed ? 1 : 0; pattern.
+ *  Tree walk callback to make sure no GT_QMARK nodes are present in the tree.
  */
-Compiler::fgWalkResult Compiler::fgAssertNoQmark(GenTree** tree, fgWalkData* data)
+Compiler::fgWalkResult Compiler::fgAssertNoQmark(GenTree** use, GenTree* user)
 {
-    if ((*tree)->OperGet() == GT_QMARK)
+    if ((*use)->OperIs(GT_QMARK))
     {
-        fgCheckQmarkAllowedForm(*tree);
+        assert(!"Qmarks beyond morph disallowed.");
     }
-    return WALK_CONTINUE;
-}
 
-void Compiler::fgCheckQmarkAllowedForm(GenTree* tree)
-{
-    assert(tree->OperGet() == GT_QMARK);
-    assert(!"Qmarks beyond morph disallowed.");
+    return WALK_CONTINUE;
 }
 
 /*****************************************************************************
@@ -16447,13 +16450,13 @@ void Compiler::fgPreExpandQmarkChecks(GenTree* expr)
     // there are no qmarks within it.
     if (topQmark == nullptr)
     {
-        fgWalkTreePre(&expr, Compiler::fgAssertNoQmark, nullptr);
+        fgWalkTreePre(&expr, Compiler::fgAssertNoQmark);
     }
     else
     {
         // We could probably expand the cond node also, but don't think the extra effort is necessary,
         // so let's just assert the cond node of a top level qmark doesn't have further top level qmarks.
-        fgWalkTreePre(&topQmark->AsOp()->gtOp1, Compiler::fgAssertNoQmark, nullptr);
+        fgWalkTreePre(&topQmark->AsOp()->gtOp1, Compiler::fgAssertNoQmark);
 
         fgPreExpandQmarkChecks(topQmark->AsOp()->gtOp2->AsOp()->gtOp1);
         fgPreExpandQmarkChecks(topQmark->AsOp()->gtOp2->AsOp()->gtOp2);
@@ -16941,8 +16944,7 @@ void Compiler::fgPostExpandQmarkChecks()
     {
         for (Statement* const stmt : block->Statements())
         {
-            GenTree* expr = stmt->GetRootNode();
-            fgWalkTreePre(&expr, Compiler::fgAssertNoQmark, nullptr);
+            fgWalkTreePre(stmt->GetRootNodePointer(), Compiler::fgAssertNoQmark);
         }
     }
 }

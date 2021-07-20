@@ -561,23 +561,6 @@ void GenTree::DumpNodeSizes(FILE* fp)
 
 #endif // MEASURE_NODE_SIZE
 
-/*****************************************************************************
- *
- *  Walk all basic blocks and call the given function pointer for all tree
- *  nodes contained therein.
- */
-
-void Compiler::fgWalkAllTreesPre(fgWalkPreFn* visitor, void* pCallBackData)
-{
-    for (BasicBlock* const block : Blocks())
-    {
-        for (Statement* const stmt : block->Statements())
-        {
-            fgWalkTreePre(stmt->GetRootNodePointer(), visitor, pCallBackData);
-        }
-    }
-}
-
 //-----------------------------------------------------------
 // CopyReg: Copy the _gtRegNum/gtRegTag fields.
 //
@@ -1923,49 +1906,32 @@ AGAIN:
     return false;
 }
 
-struct AddrTakenDsc
-{
-    Compiler* comp;
-    bool      hasAddrTakenLcl;
-};
-
-/* static */
-Compiler::fgWalkResult Compiler::gtHasLocalsWithAddrOpCB(GenTree** pTree, fgWalkData* data)
-{
-    GenTree*  tree = *pTree;
-    Compiler* comp = data->compiler;
-
-    if (tree->gtOper == GT_LCL_VAR)
-    {
-        unsigned   lclNum = tree->AsLclVarCommon()->GetLclNum();
-        LclVarDsc* varDsc = &comp->lvaTable[lclNum];
-
-        if (varDsc->lvHasLdAddrOp || varDsc->lvAddrExposed)
-        {
-            ((AddrTakenDsc*)data->pCallbackData)->hasAddrTakenLcl = true;
-            return WALK_ABORT;
-        }
-    }
-
-    return WALK_CONTINUE;
-}
-
 /*****************************************************************************
  *
  *  Return true if this tree contains locals with lvHasLdAddrOp or lvAddrExposed
  *  flag(s) set.
  */
-
 bool Compiler::gtHasLocalsWithAddrOp(GenTree* tree)
 {
-    AddrTakenDsc desc;
+    bool hasAddrTakenLcl = false;
+    fgWalkTreePre<TreeWalkOptions::DoLclVarsOnly>(&tree, [this, &hasAddrTakenLcl](GenTree** use, GenTree* user)
+    {
+        GenTree* tree = *use;
 
-    desc.comp            = this;
-    desc.hasAddrTakenLcl = false;
+        if (tree->OperIs(GT_LCL_VAR))
+        {
+            LclVarDsc* varDsc = lvaGetDesc((*use)->AsLclVarCommon());
+            if (varDsc->lvHasLdAddrOp || varDsc->lvAddrExposed)
+            {
+                hasAddrTakenLcl = true;
+                return WALK_ABORT;
+            }
+        }
 
-    fgWalkTreePre(&tree, gtHasLocalsWithAddrOpCB, &desc);
+        return WALK_CONTINUE;
+    });
 
-    return desc.hasAddrTakenLcl;
+    return hasAddrTakenLcl;
 }
 
 #ifdef DEBUG
@@ -6033,7 +5999,7 @@ GenTreeQmark* Compiler::gtNewQmarkNode(var_types type, GenTree* cond, GenTree* c
 #ifdef DEBUG
     if (compQmarkRationalized)
     {
-        fgCheckQmarkAllowedForm(result);
+        assert("!No QMARKs allowed after morph!");
     }
 #endif
     return result;
@@ -16054,21 +16020,7 @@ void dispNodeList(GenTree* list, bool verbose)
     }
     printf(""); // null string means flush
 }
-
-/*****************************************************************************
- * Callback to assert that the nodes of a qmark-colon subtree are marked
- */
-
-/* static */
-Compiler::fgWalkResult Compiler::gtAssertColonCond(GenTree** pTree, fgWalkData* data)
-{
-    assert(data->pCallbackData == nullptr);
-
-    assert((*pTree)->gtFlags & GTF_COLON_COND);
-
-    return WALK_CONTINUE;
-}
-#endif // DEBUG
+#endif //DEBUG
 
 /*****************************************************************************
  * Callback to mark the nodes of a qmark-colon subtree that are conditionally
@@ -16076,11 +16028,9 @@ Compiler::fgWalkResult Compiler::gtAssertColonCond(GenTree** pTree, fgWalkData* 
  */
 
 /* static */
-Compiler::fgWalkResult Compiler::gtMarkColonCond(GenTree** pTree, fgWalkData* data)
+Compiler::fgWalkResult Compiler::gtMarkColonCond(GenTree** use, GenTree* user)
 {
-    assert(data->pCallbackData == nullptr);
-
-    (*pTree)->gtFlags |= GTF_COLON_COND;
+    (*use)->gtFlags |= GTF_COLON_COND;
 
     return WALK_CONTINUE;
 }
@@ -16093,13 +16043,11 @@ Compiler::fgWalkResult Compiler::gtMarkColonCond(GenTree** pTree, fgWalkData* da
  */
 
 /* static */
-Compiler::fgWalkResult Compiler::gtClearColonCond(GenTree** pTree, fgWalkData* data)
+Compiler::fgWalkResult Compiler::gtClearColonCond(GenTree** use, GenTree* user)
 {
-    GenTree* tree = *pTree;
+    GenTree* tree = *use;
 
-    assert(data->pCallbackData == nullptr);
-
-    if (tree->OperGet() == GT_COLON)
+    if (tree->OperIs(GT_COLON))
     {
         // Nodes below this will be conditionally executed.
         return WALK_SKIP_SUBTREES;
@@ -16109,58 +16057,39 @@ Compiler::fgWalkResult Compiler::gtClearColonCond(GenTree** pTree, fgWalkData* d
     return WALK_CONTINUE;
 }
 
-/*****************************************************************************
- *
- *  Callback used by the tree walker to implement fgFindLink()
- */
-static Compiler::fgWalkResult gtFindLinkCB(GenTree** pTree, Compiler::fgWalkData* cbData)
-{
-    Compiler::FindLinkData* data = (Compiler::FindLinkData*)cbData->pCallbackData;
-    if (*pTree == data->nodeToFind)
-    {
-        data->result = pTree;
-        data->parent = cbData->parent;
-        return Compiler::WALK_ABORT;
-    }
-
-    return Compiler::WALK_CONTINUE;
-}
-
 Compiler::FindLinkData Compiler::gtFindLink(Statement* stmt, GenTree* node)
 {
-    FindLinkData data = {node, nullptr, nullptr};
+    FindLinkData link = {node, nullptr, nullptr};
 
-    fgWalkResult result = fgWalkTreePre(stmt->GetRootNodePointer(), gtFindLinkCB, &data);
-
-    if (result == WALK_ABORT)
+    fgWalkTreePre(stmt->GetRootNodePointer(), [&link](GenTree** use, GenTree* user)
     {
-        assert(data.nodeToFind == *data.result);
-        return data;
-    }
-    else
-    {
-        return {node, nullptr, nullptr};
-    }
-}
+        if (*use == link.nodeToFind)
+        {
+            link.result = use;
+            link.parent = user;
+            return WALK_ABORT;
+        }
 
-/*****************************************************************************
- *
- *  Callback that checks if a tree node has oper type GT_CATCH_ARG
- */
+        return WALK_CONTINUE;
+    });
 
-static Compiler::fgWalkResult gtFindCatchArg(GenTree** pTree, Compiler::fgWalkData* /* data */)
-{
-    return ((*pTree)->OperGet() == GT_CATCH_ARG) ? Compiler::WALK_ABORT : Compiler::WALK_CONTINUE;
+    return link;
 }
 
 /*****************************************************************************/
 bool Compiler::gtHasCatchArg(GenTree* tree)
 {
-    if (((tree->gtFlags & GTF_ORDER_SIDEEFF) != 0) && (fgWalkTreePre(&tree, gtFindCatchArg) == WALK_ABORT))
+    if (!gtTreeHasSideEffects(tree, GTF_ORDER_SIDEEFF))
     {
-        return true;
+        return false;
     }
-    return false;
+
+    fgWalkResult walkResult = fgWalkTreePre(&tree, [](GenTree** use, GenTree* user)
+    {
+        return (*use)->OperIs(GT_CATCH_ARG) ? WALK_ABORT : WALK_CONTINUE;
+    });
+
+    return walkResult == WALK_ABORT;
 }
 
 //------------------------------------------------------------------------
@@ -16314,39 +16243,15 @@ bool Compiler::gtIsActiveCSE_Candidate(GenTree* tree)
 
 /*****************************************************************************/
 
-struct ComplexityStruct
-{
-    unsigned m_numNodes;
-    unsigned m_nodeLimit;
-    ComplexityStruct(unsigned nodeLimit) : m_numNodes(0), m_nodeLimit(nodeLimit)
-    {
-    }
-};
-
-static Compiler::fgWalkResult ComplexityExceedsWalker(GenTree** pTree, Compiler::fgWalkData* data)
-{
-    ComplexityStruct* pComplexity = (ComplexityStruct*)data->pCallbackData;
-    if (++pComplexity->m_numNodes > pComplexity->m_nodeLimit)
-    {
-        return Compiler::WALK_ABORT;
-    }
-    else
-    {
-        return Compiler::WALK_CONTINUE;
-    }
-}
-
 bool Compiler::gtComplexityExceeds(GenTree** tree, unsigned limit)
 {
-    ComplexityStruct complexity(limit);
-    if (fgWalkTreePre(tree, &ComplexityExceedsWalker, &complexity) == WALK_ABORT)
+    unsigned numNodes = 0;
+    fgWalkResult walkResult = fgWalkTreePre(tree, [&numNodes, limit](GenTree** use, GenTree* user)
     {
-        return true;
-    }
-    else
-    {
-        return false;
-    }
+        return ++numNodes > limit ? WALK_ABORT : WALK_CONTINUE;
+    });
+
+    return walkResult == WALK_ABORT;
 }
 
 bool GenTree::IsPhiNode()

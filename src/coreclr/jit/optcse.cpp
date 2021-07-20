@@ -157,29 +157,6 @@ bool Compiler::optUnmarkCSE(GenTree* tree)
     }
 }
 
-Compiler::fgWalkResult Compiler::optCSE_MaskHelper(GenTree** pTree, fgWalkData* walkData)
-{
-    GenTree*         tree      = *pTree;
-    Compiler*        comp      = walkData->compiler;
-    optCSE_MaskData* pUserData = (optCSE_MaskData*)(walkData->pCallbackData);
-
-    if (IS_CSE_INDEX(tree->gtCSEnum))
-    {
-        unsigned cseIndex = GET_CSE_INDEX(tree->gtCSEnum);
-        unsigned cseBit   = genCSEnum2bit(cseIndex);
-        if (IS_CSE_DEF(tree->gtCSEnum))
-        {
-            BitVecOps::AddElemD(comp->cseMaskTraits, pUserData->CSE_defMask, cseBit);
-        }
-        else
-        {
-            BitVecOps::AddElemD(comp->cseMaskTraits, pUserData->CSE_useMask, cseBit);
-        }
-    }
-
-    return WALK_CONTINUE;
-}
-
 // This functions walks all the node for an given tree
 // and return the mask of CSE defs and uses for the tree
 //
@@ -187,7 +164,27 @@ void Compiler::optCSE_GetMaskData(GenTree* tree, optCSE_MaskData* pMaskData)
 {
     pMaskData->CSE_defMask = BitVecOps::MakeEmpty(cseMaskTraits);
     pMaskData->CSE_useMask = BitVecOps::MakeEmpty(cseMaskTraits);
-    fgWalkTreePre(&tree, optCSE_MaskHelper, (void*)pMaskData);
+
+    fgWalkTreePre(&tree, [this, pMaskData](GenTree** use, GenTree* user)
+    {
+        GenTree* tree = *use;
+
+        if (IS_CSE_INDEX(tree->gtCSEnum))
+        {
+            unsigned cseIndex = GET_CSE_INDEX(tree->gtCSEnum);
+            unsigned cseBit   = genCSEnum2bit(cseIndex);
+            if (IS_CSE_DEF(tree->gtCSEnum))
+            {
+                BitVecOps::AddElemD(cseMaskTraits, pMaskData->CSE_defMask, cseBit);
+            }
+            else
+            {
+                BitVecOps::AddElemD(cseMaskTraits, pMaskData->CSE_useMask, cseBit);
+            }
+        }
+
+        return WALK_CONTINUE;
+    });
 }
 
 //------------------------------------------------------------------------

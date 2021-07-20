@@ -1419,30 +1419,6 @@ void RangeCheck::MapStmtDefs(const Location& loc)
     }
 }
 
-struct MapMethodDefsData
-{
-    RangeCheck* rc;
-    BasicBlock* block;
-    Statement*  stmt;
-
-    MapMethodDefsData(RangeCheck* rc, BasicBlock* block, Statement* stmt) : rc(rc), block(block), stmt(stmt)
-    {
-    }
-};
-
-Compiler::fgWalkResult MapMethodDefsVisitor(GenTree** ptr, Compiler::fgWalkData* data)
-{
-    GenTree*           tree = *ptr;
-    MapMethodDefsData* rcd  = ((MapMethodDefsData*)data->pCallbackData);
-
-    if (tree->IsLocal())
-    {
-        rcd->rc->MapStmtDefs(RangeCheck::Location(rcd->block, rcd->stmt, tree->AsLclVarCommon(), data->parent));
-    }
-
-    return Compiler::WALK_CONTINUE;
-}
-
 void RangeCheck::MapMethodDefs()
 {
     // First, gather where all definitions occur in the program and store it in a map.
@@ -1450,10 +1426,19 @@ void RangeCheck::MapMethodDefs()
     {
         for (Statement* const stmt : block->Statements())
         {
-            MapMethodDefsData data(this, block, stmt);
-            m_pCompiler->fgWalkTreePre(stmt->GetRootNodePointer(), MapMethodDefsVisitor, &data, false, true);
+            m_pCompiler->fgWalkTreePre(stmt->GetRootNodePointer(), [this, block, stmt](GenTree** use, GenTree* user)
+            {
+                GenTree* tree = *use;
+                if (tree->IsLocal())
+                {
+                    MapStmtDefs(RangeCheck::Location(block, stmt, tree->AsLclVarCommon(), user));
+                }
+
+                return Compiler::WALK_CONTINUE;
+            });
         }
     }
+
     m_fMappedDefs = true;
 }
 #endif

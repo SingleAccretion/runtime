@@ -2270,34 +2270,6 @@ void Compiler::fgDumpTrees(BasicBlock* firstBlock, BasicBlock* lastBlock)
  * We convert 'intOp1*intOp2' into 'int(long(nop(intOp1))*long(intOp2))'.
  */
 
-/* static */
-Compiler::fgWalkResult Compiler::fgStress64RsltMulCB(GenTree** pTree, fgWalkData* data)
-{
-    GenTree*  tree  = *pTree;
-    Compiler* pComp = data->compiler;
-
-    if (tree->gtOper != GT_MUL || tree->gtType != TYP_INT || (tree->gtOverflow()))
-    {
-        return WALK_CONTINUE;
-    }
-
-    JITDUMP("STRESS_64RSLT_MUL before:\n");
-    DISPTREE(tree);
-
-    // To ensure optNarrowTree() doesn't fold back to the original tree.
-    tree->AsOp()->gtOp1 = pComp->gtNewCastNode(TYP_LONG, tree->AsOp()->gtOp1, false, TYP_LONG);
-    tree->AsOp()->gtOp1 = pComp->gtNewOperNode(GT_NOP, TYP_LONG, tree->AsOp()->gtOp1);
-    tree->AsOp()->gtOp1 = pComp->gtNewCastNode(TYP_LONG, tree->AsOp()->gtOp1, false, TYP_LONG);
-    tree->AsOp()->gtOp2 = pComp->gtNewCastNode(TYP_LONG, tree->AsOp()->gtOp2, false, TYP_LONG);
-    tree->gtType        = TYP_LONG;
-    *pTree              = pComp->gtNewCastNode(TYP_INT, tree, false, TYP_INT);
-
-    JITDUMP("STRESS_64RSLT_MUL after:\n");
-    DISPTREE(*pTree);
-
-    return WALK_SKIP_SUBTREES;
-}
-
 void Compiler::fgStress64RsltMul()
 {
     if (!compStressCompile(STRESS_64RSLT_MUL, 20))
@@ -2305,7 +2277,31 @@ void Compiler::fgStress64RsltMul()
         return;
     }
 
-    fgWalkAllTreesPre(fgStress64RsltMulCB, (void*)this);
+    fgWalkAllTreesPre([this](GenTree** use, GenTree* user)
+    {
+        GenTree* tree  = *use;
+
+        if (!tree->OperIs(GT_MUL) || !tree->TypeIs(TYP_INT) || tree->gtOverflow())
+        {
+            return WALK_CONTINUE;
+        }
+
+        JITDUMP("STRESS_64RSLT_MUL before:\n");
+        DISPTREE(tree);
+
+        // To ensure optNarrowTree() doesn't fold back to the original tree.
+        tree->AsOp()->gtOp1 = gtNewCastNode(TYP_LONG, tree->AsOp()->gtOp1, false, TYP_LONG);
+        tree->AsOp()->gtOp1 = gtNewOperNode(GT_NOP, TYP_LONG, tree->AsOp()->gtOp1);
+        tree->AsOp()->gtOp1 = gtNewCastNode(TYP_LONG, tree->AsOp()->gtOp1, false, TYP_LONG);
+        tree->AsOp()->gtOp2 = gtNewCastNode(TYP_LONG, tree->AsOp()->gtOp2, false, TYP_LONG);
+        tree->gtType        = TYP_LONG;
+        *use                = gtNewCastNode(TYP_INT, tree, false, TYP_INT);
+
+        JITDUMP("STRESS_64RSLT_MUL after:\n");
+        DISPTREE(*use);
+
+        return WALK_SKIP_SUBTREES;
+    });
 }
 
 // BBPredsChecker checks jumps from the block's predecessors to the block.
@@ -2851,8 +2847,8 @@ void Compiler::fgDebugCheckFlags(GenTree* tree)
         GenTree* op2 = tree->gtGetOp2IfPresent();
 
         // During GS work, we make shadow copies for params.
-        // In gsParamsToShadows(), we create a shadow var of TYP_INT for every small type param.
-        // Then in gsReplaceShadowParams(), we change the gtLclNum to the shadow var.
+        // In gsParamsToShadows(), first we create a shadow var of TYP_INT for every small type param.
+        // Then we change the gtLclNum to the shadow var.
         // We also change the types of the local var tree and the assignment tree to TYP_INT if necessary.
         // However, since we don't morph the tree at this late stage. Manually propagating
         // TYP_INT up to the GT_ASG tree is only correct if we don't need to propagate the TYP_INT back up.
@@ -3607,21 +3603,6 @@ public:
     }
 
     //------------------------------------------------------------------------
-    // fgMarkTreeId: Visit all subtrees in the tree and check gtTreeIDs.
-    //
-    // Arguments:
-    //    pTree     - Pointer to the tree to walk
-    //    fgWalkPre - the UniquenessCheckWalker instance
-    //
-    static Compiler::fgWalkResult MarkTreeId(GenTree** pTree, Compiler::fgWalkData* fgWalkPre)
-    {
-        UniquenessCheckWalker* walker   = static_cast<UniquenessCheckWalker*>(fgWalkPre->pCallbackData);
-        unsigned               gtTreeID = (*pTree)->gtTreeID;
-        walker->CheckTreeId(gtTreeID);
-        return Compiler::WALK_CONTINUE;
-    }
-
-    //------------------------------------------------------------------------
     // CheckTreeId: Check that this tree was not visited before and memorize it as visited.
     //
     // Arguments:
@@ -3672,8 +3653,12 @@ void Compiler::fgDebugCheckNodesUniqueness()
         {
             for (Statement* const stmt : block->Statements())
             {
-                GenTree* root = stmt->GetRootNode();
-                fgWalkTreePre(&root, UniquenessCheckWalker::MarkTreeId, &walker);
+                fgWalkTreePre(stmt->GetRootNodePointer(), [&walker](GenTree** use, GenTree* user)
+                {
+                    walker.CheckTreeId((*use)->gtTreeID);
+
+                    return Compiler::WALK_CONTINUE;
+                });
             }
         }
     }

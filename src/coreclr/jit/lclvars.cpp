@@ -7914,9 +7914,9 @@ static unsigned LCL_FLD_PADDING(unsigned lclNum)
     In the first pass we will mark the locals where we CAN't apply the stress mode.
     In the second pass we will do the appropiate morphing wherever we've not determined we can't do it.
 */
-Compiler::fgWalkResult Compiler::lvaStressLclFldCB(GenTree** pTree, fgWalkData* data)
+Compiler::fgWalkResult Compiler::lvaStressLclFldCB(GenTree** use, GenTree* user, lvaStressLclFldArgs* args)
 {
-    GenTree*   tree = *pTree;
+    GenTree*   tree = *use;
     genTreeOps oper = tree->OperGet();
     GenTree*   lcl;
 
@@ -7941,8 +7941,8 @@ Compiler::fgWalkResult Compiler::lvaStressLclFldCB(GenTree** pTree, fgWalkData* 
 
     noway_assert(lcl->OperIs(GT_LCL_VAR, GT_LCL_VAR_ADDR));
 
-    Compiler* const  pComp      = ((lvaStressLclFldArgs*)data->pCallbackData)->m_pCompiler;
-    const bool       bFirstPass = ((lvaStressLclFldArgs*)data->pCallbackData)->m_bFirstPass;
+    Compiler* const  pComp      = args->m_pCompiler;
+    const bool       bFirstPass = args->m_bFirstPass;
     const unsigned   lclNum     = lcl->AsLclVarCommon()->GetLclNum();
     var_types        type       = lcl->TypeGet();
     LclVarDsc* const varDsc     = pComp->lvaGetDesc(lclNum);
@@ -8050,7 +8050,7 @@ Compiler::fgWalkResult Compiler::lvaStressLclFldCB(GenTree** pTree, fgWalkData* 
             GenTree* paddingTree = pComp->gtNewIconNode(padding);
             GenTree* newAddr     = pComp->gtNewOperNode(GT_ADD, tree->gtType, tree, paddingTree);
 
-            *pTree = newAddr;
+            *use = newAddr;
 
             lcl->gtType = TYP_BLK;
         }
@@ -8068,16 +8068,14 @@ void Compiler::lvaStressLclFld()
         return;
     }
 
-    lvaStressLclFldArgs Args;
-    Args.m_pCompiler  = this;
-    Args.m_bFirstPass = true;
+    lvaStressLclFldArgs args = {this, true};
 
     // Do First pass
-    fgWalkAllTreesPre(lvaStressLclFldCB, &Args);
+    fgWalkAllTreesPre(lvaStressLclFldCB, &args);
 
     // Second pass
-    Args.m_bFirstPass = false;
-    fgWalkAllTreesPre(lvaStressLclFldCB, &Args);
+    args.m_bFirstPass = false;
+    fgWalkAllTreesPre(lvaStressLclFldCB, &args);
 }
 
 #endif // DEBUG

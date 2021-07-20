@@ -17,30 +17,6 @@ XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
 /*****************************************************************************
  *
- *  Helper passed to Compiler::fgWalkTreePre() to find the Asgn node for optAddCopies()
- */
-
-/* static */
-Compiler::fgWalkResult Compiler::optAddCopiesCallback(GenTree** pTree, fgWalkData* data)
-{
-    GenTree* tree = *pTree;
-
-    if (tree->OperIs(GT_ASG))
-    {
-        GenTree*  op1  = tree->AsOp()->gtOp1;
-        Compiler* comp = data->compiler;
-
-        if ((op1->gtOper == GT_LCL_VAR) && (op1->AsLclVarCommon()->GetLclNum() == comp->optAddCopyLclNum))
-        {
-            comp->optAddCopyAsgnNode = tree;
-            return WALK_ABORT;
-        }
-    }
-    return WALK_CONTINUE;
-}
-
-/*****************************************************************************
- *
  *  Add new copies before Assertion Prop.
  */
 
@@ -442,7 +418,23 @@ void Compiler::optAddCopies()
             optAddCopyLclNum   = lclNum;  // in
             optAddCopyAsgnNode = nullptr; // out
 
-            fgWalkTreePre(stmt->GetRootNodePointer(), Compiler::optAddCopiesCallback, (void*)this, false);
+            fgWalkTreePre(stmt->GetRootNodePointer(), [this](GenTree** use, GenTree* user)
+            {
+                GenTree* tree = *use;
+
+                if (tree->OperIs(GT_ASG))
+                {
+                    GenTree* op1 = tree->AsOp()->gtGetOp1();
+
+                    if (op1->OperIs(GT_LCL_VAR) && (op1->AsLclVarCommon()->GetLclNum() == optAddCopyLclNum))
+                    {
+                        optAddCopyAsgnNode = tree;
+                        return WALK_ABORT;
+                    }
+                }
+
+                return WALK_CONTINUE;
+            });
 
             noway_assert(optAddCopyAsgnNode);
 
@@ -5025,18 +5017,6 @@ ASSERT_TP* Compiler::optInitAssertionDataflowFlags()
     return jumpDestOut;
 }
 
-// Callback data for the VN based constant prop visitor.
-struct VNAssertionPropVisitorInfo
-{
-    Compiler*   pThis;
-    Statement*  stmt;
-    BasicBlock* block;
-    VNAssertionPropVisitorInfo(Compiler* pThis, BasicBlock* block, Statement* stmt)
-        : pThis(pThis), stmt(stmt), block(block)
-    {
-    }
-};
-
 //------------------------------------------------------------------------------
 // optExtractSideEffListFromConst
 //    Extracts side effects from a tree so it can be replaced with a comma
@@ -5330,32 +5310,6 @@ void Compiler::optVnNonNullPropCurStmt(BasicBlock* block, Statement* stmt, GenTr
     }
 }
 
-//------------------------------------------------------------------------------
-// optVNAssertionPropCurStmtVisitor
-//    Unified Value Numbering based assertion propagation visitor.
-//
-// Assumption:
-//    This function is called as part of a pre-order tree walk.
-//
-// Return Value:
-//    WALK_RESULTs.
-//
-// Description:
-//    An unified value numbering based assertion prop visitor that
-//    performs non-null and constant assertion propagation based on
-//    value numbers.
-//
-/* static */
-Compiler::fgWalkResult Compiler::optVNAssertionPropCurStmtVisitor(GenTree** ppTree, fgWalkData* data)
-{
-    VNAssertionPropVisitorInfo* pData = (VNAssertionPropVisitorInfo*)data->pCallbackData;
-    Compiler*                   pThis = pData->pThis;
-
-    pThis->optVnNonNullPropCurStmt(pData->block, pData->stmt, *ppTree);
-
-    return pThis->optVNConstantPropCurStmt(pData->block, pData->stmt, *ppTree);
-}
-
 /*****************************************************************************
  *
  *   Perform VN based i.e., data flow based assertion prop first because
@@ -5381,8 +5335,12 @@ Statement* Compiler::optVNAssertionPropCurStmt(BasicBlock* block, Statement* stm
     // anything in assertion gen.
     optAssertionPropagatedCurrentStmt = false;
 
-    VNAssertionPropVisitorInfo data(this, block, stmt);
-    fgWalkTreePre(stmt->GetRootNodePointer(), Compiler::optVNAssertionPropCurStmtVisitor, &data);
+    fgWalkTreePre(stmt->GetRootNodePointer(), [this, stmt, block](GenTree** use, GenTree* user)
+    {
+        optVnNonNullPropCurStmt(block, stmt, *use);
+
+        return optVNConstantPropCurStmt(block, stmt, *use);
+    });
 
     if (optAssertionPropagatedCurrentStmt)
     {

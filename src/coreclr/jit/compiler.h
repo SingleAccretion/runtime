@@ -73,7 +73,8 @@ XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 struct InfoHdr;            // defined in GCInfo.h
 struct escapeMapping_t;    // defined in fgdiagnostic.cpp
 class emitter;             // defined in emit.h
-struct ShadowParamVarInfo; // defined in GSChecks.cpp
+struct ShadowParamVarInfo; // defined in gschecks.cpp
+struct MarkPtrsInfo;       // defined in gschecks.cpp
 struct InitVarDscInfo;     // defined in register_arg_convention.h
 class FgStack;             // defined in fgbasic.cpp
 class Instrumentor;        // defined in fgprofile.cpp
@@ -3291,11 +3292,10 @@ public:
     typedef fgWalkResult(fgWalkPreFn)(GenTree** pTree, fgWalkData* data);
     typedef fgWalkResult(fgWalkPostFn)(GenTree** pTree, fgWalkData* data);
 
-#ifdef DEBUG
-    static fgWalkPreFn gtAssertColonCond;
-#endif
-    static fgWalkPreFn gtMarkColonCond;
-    static fgWalkPreFn gtClearColonCond;
+    typedef fgWalkResult(fgWalkPreFn2)(GenTree** use, GenTree* user);
+
+    static fgWalkResult gtMarkColonCond(GenTree** use, GenTree* user);
+    static fgWalkResult gtClearColonCond(GenTree** use, GenTree* user);
 
     struct FindLinkData
     {
@@ -3676,8 +3676,8 @@ public:
         bool      m_bFirstPass;
     };
 
-    static fgWalkPreFn lvaStressLclFldCB;
-    void               lvaStressLclFld();
+    static fgWalkResult lvaStressLclFldCB(GenTree** use, GenTree* user, lvaStressLclFldArgs* args);
+    void                lvaStressLclFld();
 
     void lvaDispVarSet(VARSET_VALARG_TP set, VARSET_VALARG_TP allVars);
     void lvaDispVarSet(VARSET_VALARG_TP set);
@@ -4385,7 +4385,6 @@ private:
     void impSpillSideEffects(bool spillGlobEffects, unsigned chkLevel DEBUGARG(const char* reason));
     void               impSpillValueClasses();
     void               impSpillEvalStack();
-    static fgWalkPreFn impFindValueClasses;
     void impSpillLclRefs(ssize_t lclNum);
 
     BasicBlock* impPushCatchArgOnStack(BasicBlock* hndBlk, CORINFO_CLASS_HANDLE clsHnd, bool isSingleBlockFilter);
@@ -4913,10 +4912,9 @@ public:
     void fgSetOptions();
 
 #ifdef DEBUG
-    static fgWalkPreFn fgAssertNoQmark;
+    static fgWalkResult fgAssertNoQmark(GenTree** use, GenTree* user);
     void fgPreExpandQmarkChecks(GenTree* expr);
-    void        fgPostExpandQmarkChecks();
-    static void fgCheckQmarkAllowedForm(GenTree* tree);
+    void fgPostExpandQmarkChecks();
 #endif
 
     IL_OFFSET fgFindBlockILOffset(BasicBlock* block);
@@ -5631,9 +5629,8 @@ public:
     void fgDumpBlock(BasicBlock* block);
     void fgDumpTrees(BasicBlock* firstBlock, BasicBlock* lastBlock);
 
-    static fgWalkPreFn fgStress64RsltMulCB;
-    void               fgStress64RsltMul();
-    void               fgDebugCheckUpdate();
+    void fgStress64RsltMul();
+    void fgDebugCheckUpdate();
     void fgDebugCheckBBlist(bool checkBBNum = false, bool checkBBRefs = true);
     void fgDebugCheckBlockLinks();
     void fgDebugCheckLinks(bool morphTrees = false);
@@ -5672,21 +5669,16 @@ public:
 #endif
     };
 
-    fgWalkResult fgWalkTreePre(GenTree**    pTree,
-                               fgWalkPreFn* visitor,
-                               void*        pCallBackData = nullptr,
-                               bool         lclVarsOnly   = false,
-                               bool         computeStack  = false);
+    template <TreeWalkOptions Options = static_cast<TreeWalkOptions>(0), typename TVisitor, typename... TUserArgs>
+    fgWalkResult fgWalkTreePre(GenTree** use, TVisitor&& visitor, TUserArgs... args);
 
-    template <TreeWalkOptions Options = static_cast<TreeWalkOptions>(0), typename TVisitor>
-    fgWalkResult fgWalkTreePre(GenTree** pTree, TVisitor&& visitor);
+    template <TreeWalkOptions Options = static_cast<TreeWalkOptions>(0), typename TVisitor, typename... TUserArgs>
+    void fgWalkAllTreesPre(TVisitor&& visitor, TUserArgs... userArgs);
 
     fgWalkResult fgWalkTree(GenTree**     pTree,
                             fgWalkPreFn*  preVisitor,
                             fgWalkPostFn* postVisitor,
                             void*         pCallBackData = nullptr);
-
-    void fgWalkAllTreesPre(fgWalkPreFn* visitor, void* pCallBackData);
 
     //----- Postorder
 
@@ -5695,15 +5687,13 @@ public:
                                 void*         pCallBackData = nullptr,
                                 bool          computeStack  = false);
 
-    // An fgWalkPreFn that looks for expressions that have inline throws in
+    // An callback that looks for expressions that have inline throws in
     // minopts mode. Basically it looks for tress with gtOverflowEx() or
     // GTF_IND_RNGCHK.  It returns WALK_ABORT if one is found.  It
     // returns WALK_SKIP_SUBTREES if GTF_EXCEPT is not set (assumes flags
     // properly propagated to parent trees).  It returns WALK_CONTINUE
     // otherwise.
-    static fgWalkResult fgChkThrowCB(GenTree** pTree, Compiler::fgWalkData* data);
-    static fgWalkResult fgChkLocAllocCB(GenTree** pTree, Compiler::fgWalkData* data);
-    static fgWalkResult fgChkQmarkCB(GenTree** pTree, Compiler::fgWalkData* data);
+    static fgWalkResult fgChkThrowCB(GenTree** use, GenTree* user);
 
     /**************************************************************************
      *                          PROTECTED
@@ -6021,7 +6011,7 @@ private:
     void fgMorphCallInlineHelper(GenTreeCall* call, InlineResult* result);
 #if DEBUG
     void fgNoteNonInlineCandidate(Statement* stmt, GenTreeCall* call);
-    static fgWalkPreFn fgFindNonInlineCandidate;
+    static fgWalkResult fgFindNonInlineCandidate(GenTree** use, GenTree* user, Compiler* compiler, Statement* stmt);
 #endif
     GenTree* fgOptimizeDelegateConstructor(GenTreeCall*            call,
                                            CORINFO_CONTEXT_HANDLE* ExactContextHnd,
@@ -6154,10 +6144,9 @@ private:
     static fgWalkPostFn fgLateDevirtualization;
 
 #ifdef DEBUG
-    static fgWalkPreFn fgDebugCheckInlineCandidates;
+    static fgWalkResult fgDebugCheckInlineCandidates(GenTree** use, GenTree* user);
 
-    void               CheckNoTransformableIndirectCallsRemain();
-    static fgWalkPreFn fgDebugCheckForTransformableIndirectCalls;
+    void CheckNoTransformableIndirectCallsRemain();
 #endif
 
     void fgPromoteStructs();
@@ -6188,8 +6177,6 @@ private:
     // a "lclField", to make it masquerade as an integral type in the ABI.  Make sure that
     // the variable is not enregistered, and is therefore not promoted independently.
     void fgLclFldAssign(unsigned lclNum);
-
-    static fgWalkPreFn gtHasLocalsWithAddrOpCB;
 
     enum TypeProducerKind
     {
@@ -6222,17 +6209,10 @@ private:
 public:
     void optInit();
 
-    GenTree* Compiler::optRemoveRangeCheck(GenTreeBoundsChk* check, GenTree* comma, Statement* stmt);
-    GenTree* Compiler::optRemoveStandaloneRangeCheck(GenTreeBoundsChk* check, Statement* stmt);
-    void Compiler::optRemoveCommaBasedRangeCheck(GenTree* comma, Statement* stmt);
+    GenTree* optRemoveRangeCheck(GenTreeBoundsChk* check, GenTree* comma, Statement* stmt);
+    GenTree* optRemoveStandaloneRangeCheck(GenTreeBoundsChk* check, Statement* stmt);
+    void optRemoveCommaBasedRangeCheck(GenTree* comma, Statement* stmt);
     bool optIsRangeCheckRemovable(GenTree* tree);
-
-protected:
-    static fgWalkPreFn optValidRangeCheckIndex;
-
-    /**************************************************************************
-     *
-     *************************************************************************/
 
 protected:
     // Do hoisting for all loops.
@@ -6663,7 +6643,7 @@ protected:
         int arrayLengthCount;
     };
 
-    static fgWalkResult optInvertCountTreeInfo(GenTree** pTree, fgWalkData* data);
+    static fgWalkResult optInvertCountTreeInfo(GenTree** use, GenTree* user, OptInvertCountTreeInfoType* o);
 
     bool optInvertWhileLoop(BasicBlock* block);
 
@@ -6681,7 +6661,20 @@ private:
                            bool       dupCond,
                            unsigned*  iterCount);
 
-    static fgWalkPreFn optIsVarAssgCB;
+    struct isVarAssgDsc
+    {
+        GenTree*     ivaSkip;
+        ALLVARSET_TP ivaMaskVal; // Set of variables assigned to.  This is a set of all vars, not tracked vars.
+#ifdef DEBUG
+        void* ivaSelf;
+#endif
+        unsigned    ivaVar;            // Variable we are interested in, or -1
+        varRefKinds ivaMaskInd;        // What kind of indirect assignments are there?
+        callInterf  ivaMaskCall;       // What kind of calls are there?
+        bool        ivaMaskIncomplete; // Variables not representable in ivaMaskVal were assigned to.
+    };
+
+    static fgWalkResult optIsVarAssgCB(GenTree** use, GenTree* user, Compiler* compiler, isVarAssgDsc* desc);
 
 protected:
     bool optIsVarAssigned(BasicBlock* beg, BasicBlock* end, GenTree* skip, unsigned var);
@@ -6812,9 +6805,6 @@ protected:
         EXPSET_TP CSE_useMask;
     };
 
-    // Treewalk helper for optCSE_DefMask and optCSE_UseMask
-    static fgWalkPreFn optCSE_MaskHelper;
-
     // This function walks all the node for an given tree
     // and return the mask of CSE definitions and uses for the tree
     //
@@ -6902,19 +6892,6 @@ protected:
     bool optConfigDisableCSE2();
 #endif
     void optOptimizeCSEs();
-
-    struct isVarAssgDsc
-    {
-        GenTree*     ivaSkip;
-        ALLVARSET_TP ivaMaskVal; // Set of variables assigned to.  This is a set of all vars, not tracked vars.
-#ifdef DEBUG
-        void* ivaSelf;
-#endif
-        unsigned    ivaVar;            // Variable we are interested in, or -1
-        varRefKinds ivaMaskInd;        // What kind of indirect assignments are there?
-        callInterf  ivaMaskCall;       // What kind of calls are there?
-        bool        ivaMaskIncomplete; // Variables not representable in ivaMaskVal were assigned to.
-    };
 
     static callInterf optCallInterf(GenTreeCall* call);
 
@@ -7377,10 +7354,8 @@ public:
     };
 
 protected:
-    static fgWalkPreFn optAddCopiesCallback;
-    static fgWalkPreFn optVNAssertionPropCurStmtVisitor;
-    unsigned           optAddCopyLclNum;
-    GenTree*           optAddCopyAsgnNode;
+    unsigned optAddCopyLclNum;
+    GenTree* optAddCopyAsgnNode;
 
     bool optLocalAssertionProp;  // indicates that we are performing local assertion prop
     bool optAssertionPropagated; // set to true if we modified the trees
@@ -7535,7 +7510,6 @@ public:
     bool optExtractArrIndex(GenTree* tree, ArrIndex* result, unsigned lhsNum);
     bool optReconstructArrIndex(GenTree* tree, ArrIndex* result, unsigned lhsNum);
     bool optIdentifyLoopOptInfo(unsigned loopNum, LoopCloneContext* context);
-    static fgWalkPreFn optCanOptimizeByLoopCloningVisitor;
     fgWalkResult optCanOptimizeByLoopCloning(GenTree* tree, LoopCloneVisitorInfo* info);
     bool optObtainLoopCloningOpts(LoopCloneContext* context);
     bool optIsLoopClonable(unsigned loopInd);
@@ -7922,7 +7896,6 @@ public:
     static CORINFO_METHOD_HANDLE eeFindHelper(unsigned helper);
     static CorInfoHelpFunc eeGetHelperNum(CORINFO_METHOD_HANDLE method);
 
-    static fgWalkPreFn CountSharedStaticHelper;
     static bool IsSharedStaticHelper(GenTree* tree);
     static bool IsTreeAlwaysHoistable(GenTree* tree);
     static bool IsGcSafePoint(GenTree* tree);
@@ -10405,8 +10378,8 @@ public:
     bool gsFindVulnerableParams(); // Shadow param analysis code
     void gsParamsToShadows();      // Insert copy code and replave param uses by shadow
 
-    static fgWalkPreFn gsMarkPtrsAndAssignGroups; // Shadow param analysis tree-walk
-    static fgWalkPreFn gsReplaceShadowParams;     // Shadow param replacement tree-walk
+    // Shadow param analysis tree-walk
+    static fgWalkResult gsMarkPtrsAndAssignGroups(GenTree** use, GenTree* user, MarkPtrsInfo* pState);
 
 #define DEFAULT_MAX_INLINE_SIZE 100 // Methods with >  DEFAULT_MAX_INLINE_SIZE IL bytes will never be inlined.
                                     // This can be overwritten by setting complus_JITInlineSize env variable.

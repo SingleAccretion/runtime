@@ -4507,9 +4507,9 @@ GenTree* Compiler::fgGetFirstNode(GenTree* tree)
 
 /*****************************************************************************/
 /*static*/
-Compiler::fgWalkResult Compiler::fgChkThrowCB(GenTree** pTree, fgWalkData* data)
+Compiler::fgWalkResult Compiler::fgChkThrowCB(GenTree** use, GenTree* user)
 {
-    GenTree* tree = *pTree;
+    GenTree* tree = *use;
 
     // If this tree doesn't have the EXCEPT flag set, then there is no
     // way any of the child nodes could throw, so we can stop recursing.
@@ -4544,34 +4544,6 @@ Compiler::fgWalkResult Compiler::fgChkThrowCB(GenTree** pTree, fgWalkData* data)
 
         default:
             break;
-    }
-
-    return Compiler::WALK_CONTINUE;
-}
-
-/*****************************************************************************/
-/*static*/
-Compiler::fgWalkResult Compiler::fgChkLocAllocCB(GenTree** pTree, fgWalkData* data)
-{
-    GenTree* tree = *pTree;
-
-    if (tree->gtOper == GT_LCLHEAP)
-    {
-        return Compiler::WALK_ABORT;
-    }
-
-    return Compiler::WALK_CONTINUE;
-}
-
-/*****************************************************************************/
-/*static*/
-Compiler::fgWalkResult Compiler::fgChkQmarkCB(GenTree** pTree, fgWalkData* data)
-{
-    GenTree* tree = *pTree;
-
-    if (tree->gtOper == GT_QMARK)
-    {
-        return Compiler::WALK_ABORT;
     }
 
     return Compiler::WALK_CONTINUE;

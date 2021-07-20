@@ -2673,7 +2673,12 @@ void Compiler::impSpillValueClasses()
     {
         GenTree* tree = verCurrentState.esStack[level].val;
 
-        if (fgWalkTreePre(&tree, impFindValueClasses) == WALK_ABORT)
+        fgWalkResult walkResult = fgWalkTreePre(&tree, [](GenTree** use, GenTree* user)
+        {
+            return (*use)->TypeIs(TYP_STRUCT) ? WALK_ABORT : WALK_CONTINUE;
+        });
+
+        if (walkResult == WALK_ABORT)
         {
             // Tree walk was aborted, which means that we found a
             // value class on the stack.  Need to spill that
@@ -2682,25 +2687,6 @@ void Compiler::impSpillValueClasses()
             impSpillStackEntry(level, BAD_VAR_NUM DEBUGARG(false) DEBUGARG("impSpillValueClasses"));
         }
     }
-}
-
-/*****************************************************************************
- *
- *  Callback that checks if a tree node is TYP_STRUCT
- */
-
-Compiler::fgWalkResult Compiler::impFindValueClasses(GenTree** pTree, fgWalkData* data)
-{
-    fgWalkResult walkResult = WALK_CONTINUE;
-
-    if ((*pTree)->gtType == TYP_STRUCT)
-    {
-        // Abort the walk and indicate that we found a value class
-
-        walkResult = WALK_ABORT;
-    }
-
-    return walkResult;
 }
 
 /*****************************************************************************
@@ -21545,10 +21531,10 @@ public:
     }
 
 private:
-    static Compiler::fgWalkResult SpillRetExprVisitor(GenTree** pTree, Compiler::fgWalkData* fgWalkPre)
+    static Compiler::fgWalkResult SpillRetExprVisitor(GenTree** use, GenTree* user, SpillRetExprHelper* walker)
     {
-        assert((pTree != nullptr) && (*pTree != nullptr));
-        GenTree* tree = *pTree;
+        assert((use != nullptr) && (*use != nullptr));
+        GenTree* tree = *use;
         if ((tree->gtFlags & GTF_CALL) == 0)
         {
             // Trees with ret_expr are marked as GTF_CALL.
@@ -21556,8 +21542,7 @@ private:
         }
         if (tree->OperGet() == GT_RET_EXPR)
         {
-            SpillRetExprHelper* walker = static_cast<SpillRetExprHelper*>(fgWalkPre->pCallbackData);
-            walker->StoreRetExprAsLocalVar(pTree);
+            walker->StoreRetExprAsLocalVar(use);
         }
         return Compiler::WALK_CONTINUE;
     }

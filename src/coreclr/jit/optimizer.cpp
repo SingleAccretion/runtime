@@ -4053,16 +4053,14 @@ bool Compiler::optReachWithoutCall(BasicBlock* topBB, BasicBlock* botBB)
 }
 
 // static
-Compiler::fgWalkResult Compiler::optInvertCountTreeInfo(GenTree** pTree, fgWalkData* data)
+Compiler::fgWalkResult Compiler::optInvertCountTreeInfo(GenTree** use, GenTree* user, OptInvertCountTreeInfoType* o)
 {
-    OptInvertCountTreeInfoType* o = (OptInvertCountTreeInfoType*)data->pCallbackData;
-
-    if (Compiler::IsSharedStaticHelper(*pTree))
+    if (Compiler::IsSharedStaticHelper(*use))
     {
         o->sharedStaticHelperCount += 1;
     }
 
-    if ((*pTree)->OperGet() == GT_ARR_LENGTH)
+    if ((*use)->OperGet() == GT_ARR_LENGTH)
     {
         o->arrayLengthCount += 1;
     }
@@ -5222,24 +5220,23 @@ bool Compiler::optNarrowTree(GenTree* tree, var_types srct, var_types dstt, Valu
  *  somewhere in a list of basic blocks (or in an entire loop).
  */
 
-Compiler::fgWalkResult Compiler::optIsVarAssgCB(GenTree** pTree, fgWalkData* data)
+Compiler::fgWalkResult Compiler::optIsVarAssgCB(GenTree** use, GenTree* user, Compiler* compiler, isVarAssgDsc* desc)
 {
-    GenTree* tree = *pTree;
+    GenTree* tree = *use;
 
     if (tree->OperIs(GT_ASG))
     {
         GenTree*   dest     = tree->AsOp()->gtOp1;
         genTreeOps destOper = dest->OperGet();
 
-        isVarAssgDsc* desc = (isVarAssgDsc*)data->pCallbackData;
-        assert(desc && desc->ivaSelf == desc);
+        assert(desc->ivaSelf == desc);
 
         if (destOper == GT_LCL_VAR)
         {
             unsigned tvar = dest->AsLclVarCommon()->GetLclNum();
             if (tvar < lclMAX_ALLSET_TRACKED)
             {
-                AllVarSetOps::AddElemD(data->compiler, desc->ivaMaskVal, tvar);
+                AllVarSetOps::AddElemD(compiler, desc->ivaMaskVal, tvar);
             }
             else
             {
@@ -5280,9 +5277,6 @@ Compiler::fgWalkResult Compiler::optIsVarAssgCB(GenTree** pTree, fgWalkData* dat
     }
     else if (tree->gtOper == GT_CALL)
     {
-        isVarAssgDsc* desc = (isVarAssgDsc*)data->pCallbackData;
-        assert(desc && desc->ivaSelf == desc);
-
         desc->ivaMaskCall = optCallInterf(tree->AsCall());
     }
 
@@ -5310,7 +5304,7 @@ bool Compiler::optIsVarAssigned(BasicBlock* beg, BasicBlock* end, GenTree* skip,
 
         for (Statement* const stmt : beg->Statements())
         {
-            if (fgWalkTreePre(stmt->GetRootNodePointer(), optIsVarAssgCB, &desc) != WALK_CONTINUE)
+            if (fgWalkTreePre(stmt->GetRootNodePointer(), optIsVarAssgCB, this, &desc) != WALK_CONTINUE)
             {
                 result = true;
                 goto DONE;
@@ -5380,7 +5374,7 @@ int Compiler::optIsSetAssgLoop(unsigned lnum, ALLVARSET_VALARG_TP vars, varRefKi
         {
             for (Statement* const stmt : block->NonPhiStatements())
             {
-                fgWalkTreePre(stmt->GetRootNodePointer(), optIsVarAssgCB, &desc);
+                fgWalkTreePre(stmt->GetRootNodePointer(), optIsVarAssgCB, this, &desc);
 
                 if (desc.ivaMaskIncomplete)
                 {
@@ -7500,38 +7494,6 @@ ssize_t Compiler::optGetArrayRefScaleAndIndex(GenTree* mul, GenTree** pIndex DEB
     return scale;
 }
 
-struct optRangeCheckDsc
-{
-    Compiler* pCompiler;
-    bool      bValidIndex;
-};
-/*
-    Walk to make sure that only locals and constants are contained in the index
-    for a range check
-*/
-Compiler::fgWalkResult Compiler::optValidRangeCheckIndex(GenTree** pTree, fgWalkData* data)
-{
-    GenTree*          tree  = *pTree;
-    optRangeCheckDsc* pData = (optRangeCheckDsc*)data->pCallbackData;
-
-    if (tree->gtOper == GT_IND || tree->gtOper == GT_CLS_VAR || tree->gtOper == GT_FIELD || tree->gtOper == GT_LCL_FLD)
-    {
-        pData->bValidIndex = false;
-        return WALK_ABORT;
-    }
-
-    if (tree->gtOper == GT_LCL_VAR)
-    {
-        if (pData->pCompiler->lvaTable[tree->AsLclVarCommon()->GetLclNum()].lvAddrExposed)
-        {
-            pData->bValidIndex = false;
-            return WALK_ABORT;
-        }
-    }
-
-    return WALK_CONTINUE;
-}
-
 /*
     returns true if a range check can legally be removed (for the moment it checks
     that the array is a local array (non subject to racing conditions) and that the
@@ -7586,13 +7548,28 @@ bool Compiler::optIsRangeCheckRemovable(GenTree* tree)
         }
     }
 
-    optRangeCheckDsc Data;
-    Data.pCompiler   = this;
-    Data.bValidIndex = true;
+    // Walk to make sure that only locals and constants are contained in the index for a range check.
+    fgWalkResult walkResult = fgWalkTreePre(&pIndex, [this](GenTree** use, GenTree* user)
+    {
+        GenTree* tree = *use;
 
-    fgWalkTreePre(&pIndex, optValidRangeCheckIndex, &Data);
+        if (tree->OperIs(GT_IND, GT_CLS_VAR, GT_FIELD, GT_LCL_FLD))
+        {
+            return WALK_ABORT;
+        }
 
-    if (!Data.bValidIndex)
+        if (tree->OperIs(GT_LCL_VAR))
+        {
+            if (lvaTable[tree->AsLclVarCommon()->GetLclNum()].lvAddrExposed)
+            {
+                return WALK_ABORT;
+            }
+        }
+
+        return WALK_CONTINUE;
+    });
+
+    if (walkResult == WALK_ABORT)
     {
 #ifdef DEBUG
         if (verbose)

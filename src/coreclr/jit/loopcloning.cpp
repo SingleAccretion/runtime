@@ -2279,12 +2279,6 @@ Compiler::fgWalkResult Compiler::optCanOptimizeByLoopCloning(GenTree* tree, Loop
     return WALK_CONTINUE;
 }
 
-/* static */
-Compiler::fgWalkResult Compiler::optCanOptimizeByLoopCloningVisitor(GenTree** pTree, Compiler::fgWalkData* data)
-{
-    return data->compiler->optCanOptimizeByLoopCloning(*pTree, (LoopCloneVisitorInfo*)data->pCallbackData);
-}
-
 //------------------------------------------------------------------------
 // optIdentifyLoopOptInfo: Identify loop optimization candidates.
 // Also, check if the loop is suitable for the optimizations performed.
@@ -2315,11 +2309,11 @@ bool Compiler::optIdentifyLoopOptInfo(unsigned loopNum, LoopCloneContext* contex
         compCurBB = block;
         for (Statement* const stmt : block->Statements())
         {
-            info.stmt               = stmt;
-            const bool lclVarsOnly  = false;
-            const bool computeStack = false;
-            fgWalkTreePre(stmt->GetRootNodePointer(), optCanOptimizeByLoopCloningVisitor, &info, lclVarsOnly,
-                          computeStack);
+            info.stmt = stmt;
+            fgWalkTreePre(stmt->GetRootNodePointer(), [this, &info](GenTree** use, GenTree* user)
+            {
+                return optCanOptimizeByLoopCloning(*use, &info);
+            });
         }
     }
 

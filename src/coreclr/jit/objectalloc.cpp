@@ -425,7 +425,12 @@ bool ObjectAllocator::MorphAllocObjNodes()
             {
                 // We assume that GT_ALLOCOBJ nodes are always present in the
                 // canonical form.
-                comp->fgWalkTreePre(stmt->GetRootNodePointer(), AssertWhenAllocObjFoundVisitor);
+                comp->fgWalkTreePre(stmt->GetRootNodePointer(), [](GenTree** use, GenTree* user)
+                {
+                    assert(!(*use)->OperIs(GT_ALLOCOBJ));
+
+                    return Compiler::fgWalkResult::WALK_CONTINUE;
+                });
             }
 #endif // DEBUG
         }
@@ -822,30 +827,6 @@ void ObjectAllocator::UpdateAncestorTypes(GenTree* tree, ArrayStack<GenTree*>* p
 
     return;
 }
-
-#ifdef DEBUG
-//------------------------------------------------------------------------
-// AssertWhenAllocObjFoundVisitor: Look for a GT_ALLOCOBJ node and assert
-//                                 when found one.
-//
-// Arguments:
-//    pTree   - Tree to examine
-//    data    - Walker data
-//
-// Return Value:
-//    Always returns fgWalkResult::WALK_CONTINUE
-
-Compiler::fgWalkResult ObjectAllocator::AssertWhenAllocObjFoundVisitor(GenTree** pTree, Compiler::fgWalkData* data)
-{
-    GenTree* tree = *pTree;
-
-    assert(tree != nullptr);
-    assert(tree->OperGet() != GT_ALLOCOBJ);
-
-    return Compiler::fgWalkResult::WALK_CONTINUE;
-}
-
-#endif // DEBUG
 
 //------------------------------------------------------------------------
 // RewriteUses: Find uses of the newobj temp for stack-allocated
