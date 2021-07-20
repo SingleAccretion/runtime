@@ -2500,6 +2500,37 @@ inline Compiler::fgWalkResult Compiler::fgWalkTreePre(
     return result;
 }
 
+template <TreeWalkOptions Options, typename TVisitor>
+inline Compiler::fgWalkResult Compiler::fgWalkTreePre(GenTree** pTree, TVisitor&& visitor)
+{
+    class PreOrderTreeVisitor final : public GenTreeVisitor<PreOrderTreeVisitor>
+    {
+    private:
+        TVisitor m_visitor;
+
+    public:
+        enum
+        {
+            DoPreOrder    = true,
+            DoLclVarsOnly = (Options & TreeWalkOptions::DoLclVarsOnly) != TreeWalkOptions::None
+        };
+
+        PreOrderTreeVisitor(Compiler* compiler, TVisitor&& visitor) : GenTreeVisitor<PreOrderTreeVisitor>(compiler)
+            , m_visitor{std::forward<TVisitor>(visitor)}
+        {
+        }
+
+        Compiler::fgWalkResult PreOrderVisit(GenTree** use, GenTree* user)
+        {
+            return m_visitor(use, user);
+        }
+    };
+
+    PreOrderTreeVisitor walker(this, std::forward<TVisitor>(visitor));
+
+    return walker.WalkTree(pTree, nullptr);
+}
+
 /*****************************************************************************
  *
  *  Same as above, except the tree walk is performed in a depth-first fashion,

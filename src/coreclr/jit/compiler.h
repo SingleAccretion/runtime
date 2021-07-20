@@ -88,6 +88,7 @@ class Lowering; // defined in lower.h
 // The following are defined in this file, Compiler.h
 
 class Compiler;
+enum class TreeWalkOptions;
 
 /*****************************************************************************
  *                  Unwind info
@@ -5677,6 +5678,9 @@ public:
                                bool         lclVarsOnly   = false,
                                bool         computeStack  = false);
 
+    template <TreeWalkOptions Options = static_cast<TreeWalkOptions>(0), typename TVisitor>
+    fgWalkResult fgWalkTreePre(GenTree** pTree, TVisitor&& visitor);
+
     fgWalkResult fgWalkTree(GenTree**     pTree,
                             fgWalkPreFn*  preVisitor,
                             fgWalkPostFn* postVisitor,
@@ -10686,6 +10690,32 @@ public:
 
     bool killGCRefs(GenTree* tree);
 }; // end of class Compiler
+
+enum class TreeWalkOptions
+{
+    None          = 0,
+    DoLclVarsOnly = 1,
+};
+
+inline constexpr bool operator ==(TreeWalkOptions left, TreeWalkOptions right)
+{
+    return static_cast<int32_t>(left) == static_cast<int32_t>(right);
+}
+
+inline constexpr bool operator !=(TreeWalkOptions left, TreeWalkOptions right)
+{
+    return static_cast<int32_t>(left) != static_cast<int32_t>(right);
+}
+
+inline constexpr TreeWalkOptions operator |(TreeWalkOptions left, TreeWalkOptions right)
+{
+    return static_cast<TreeWalkOptions>(static_cast<int32_t>(left) | static_cast<int32_t>(right));
+}
+
+inline constexpr TreeWalkOptions operator &(TreeWalkOptions left, TreeWalkOptions right)
+{
+    return static_cast<TreeWalkOptions>(static_cast<int32_t>(left) & static_cast<int32_t>(right));
+}
 
 //---------------------------------------------------------------------------------------------------------------------
 // GenTreeVisitor: a flexible tree walker implemented using the curiously-recurring-template pattern.
