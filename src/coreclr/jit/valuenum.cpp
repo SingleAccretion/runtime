@@ -4536,7 +4536,7 @@ ValueNum Compiler::fgValueNumberArrIndexVal(GenTree*             tree,
         JITDUMP("    *** Not a proper arrray access encountered in fgValueNumberArrIndexVal\n");
 
         // a new unique value number
-        selectedElem = vnStore->VNForExpr(compCurBB, elemTyp);
+        selectedElem = vnStore->VNForExpr(compCurBB, indType);
 
 #ifdef DEBUG
         if (verbose)
@@ -8722,7 +8722,7 @@ void Compiler::fgValueNumberTree(GenTree* tree)
                     //
                     if (lcl->GetSsaNum() != SsaConfig::RESERVED_SSA_NUM)
                     {
-                        ValueNum uniqVN = vnStore->VNForExpr(compCurBB, lcl->TypeGet());
+                        ValueNum uniqVN = vnStore->VNForExpr(compCurBB, varDsc->TypeGet());
                         varDsc->GetPerSsaData(lcl->GetSsaNum())->m_vnPair.SetBoth(uniqVN);
                     }
 
@@ -9021,10 +9021,10 @@ void Compiler::fgValueNumberTree(GenTree* tree)
                     else
                     {
                         tree->gtVNPair =
-                            ValueNumPair(vnStore->VNForMapSelect(VNK_Liberal, TYP_REF, ValueNumStore::VNForROH(),
-                                                                 addrNvnp.GetLiberal()),
-                                         vnStore->VNForMapSelect(VNK_Conservative, TYP_REF, ValueNumStore::VNForROH(),
-                                                                 addrNvnp.GetConservative()));
+                            ValueNumPair(vnStore->VNForMapSelect(VNK_Liberal, tree->TypeGet(),
+                                                                 ValueNumStore::VNForROH(), addrNvnp.GetLiberal()),
+                                         vnStore->VNForMapSelect(VNK_Conservative, tree->TypeGet(),
+                                                                 ValueNumStore::VNForROH(), addrNvnp.GetConservative()));
                         tree->gtVNPair = vnStore->VNPWithExc(tree->gtVNPair, addrXvnp);
                     }
                 }
