@@ -2214,6 +2214,8 @@ ValueNum ValueNumStore::VNForMapStore(ValueNum map, ValueNum index, ValueNum val
     ValueNum const               result  = VNForFunc(TypeOfVN(map), VNF_MapStore, map, index, value, loopNum);
 
 #ifdef DEBUG
+    ValidateSelection(map, index, value);
+
     if (m_pComp->verbose)
     {
         printf("    VNForMapStore(" FMT_VN ", " FMT_VN ", " FMT_VN "):%s in " FMT_BB " returns ", map, index, value,
@@ -2253,6 +2255,8 @@ ValueNum ValueNumStore::VNForMapSelect(ValueNumKind vnk, var_types type, ValueNu
     assert((budget >= 0) && (budget <= m_mapSelectBudget));
 
 #ifdef DEBUG
+    ValidateSelection(map, index, result);
+
     if (m_pComp->verbose)
     {
         printf("    VNForMapSelect(" FMT_VN ", " FMT_VN "):%s returns ", map, index, VNMapTypeName(type));
@@ -2260,6 +2264,7 @@ ValueNum ValueNumStore::VNForMapSelect(ValueNumKind vnk, var_types type, ValueNu
         printf("\n");
     }
 #endif
+
     return result;
 }
 
@@ -2579,6 +2584,153 @@ ValueNum ValueNumStore::VNForFieldSelector(CORINFO_FIELD_HANDLE fieldHnd, var_ty
 
     return fldHndVN;
 }
+
+#ifdef DEBUG
+//------------------------------------------------------------------------
+// ValidateSelection: Asserts that the type a of MapSelect-ed VN is as we expect.
+//
+// In the map construction, VNForMapSelect is given a type that the selected
+// item will have. This method validates that type against the selector.
+//
+// Arguments:
+//    map   - the map being selected from
+//    index - the index into the map
+//    value - the value being selected
+//
+void ValueNumStore::ValidateSelection(ValueNum map, ValueNum index, ValueNum value)
+{
+    var_types typeOfValue = TypeOfVN(value);
+    var_types typeOfMap   = TypeOfVN(map);
+
+    // TYP_HEAP is always selected from, never selected itself.
+    assert(typeOfValue != TYP_HEAP);
+
+    if (map == VNForROH())
+    {
+        // Anything can be selected from the read only heap,
+        // though we currently only select concrete values.
+        assert(typeOfValue != TYP_MEM);
+    }
+    else if (IsVNHandle(index))
+    {
+        ssize_t      handleValue = ConstantValue<ssize_t>(index);
+        GenTreeFlags handleFlags = GetHandleFlags(index);
+
+        if ((handleFlags & GTF_ICON_FIELD_HDL) != 0)
+        {
+            CORINFO_FIELD_HANDLE fieldHnd  = CORINFO_FIELD_HANDLE(handleValue);
+            var_types            fieldType = m_pComp->eeGetFieldType(fieldHnd);
+
+            if (m_pComp->eeIsFieldStatic(fieldHnd))
+            {
+                // Ordinary statics select their types. "Shared" statics, however, select
+                // their version of "the first field map", which is then indexed into by
+                // the logical "instantiation" argument, though see below). Or, at least,
+                // that was the original intent behind the relevant logic.
+
+                // In practice, "IsFieldAddr" "gets things wrong", and we form selection chains
+                // that are too conservative/long. First, the IR representation for the "boxed
+                // static" case, on 64 bit, when not using CLS_VAR, makes us think that such fields
+                // are in fact "shared", and use the "static offset" selector for them. Second, it
+                // also makes us think the box itself is in fact the field. Third, only fields that
+                // logically are "shared" (between generic instatiations) need this "static offset",
+                // but all cases that use helpers will hit it, because their IR shapes are similar or
+                // identical. For example, for an access of a simple struct static field in R2R code,
+                // we will form this:
+                //
+                //   $staticOffset = CAST(heap[field][helper], ref <- struct)
+                //   $fieldValue   = heap[field][$staticOffset]
+                //
+                // This is not a correctness issue, as we form selections that are "just" too
+                // conservative, but it does make for a somewhat confusing experience, and leads
+                // to quite a bit if wasted memory and cycles.
+                //
+                // It also means that the logic below cannot verify much of anything (we don't know
+                // what kind of field this is, and even if we did, we'd have to duplicate parts of
+                // the logic inside "impImportStaticField", "fgMorphField" and "IsFieldAddr" to not
+                // hit asserts. Note, at least, that statics are always selected from the heap...
+
+                assert(typeOfMap == TYP_HEAP);
+            }
+            else
+            {
+                // An instance field. If the owner of this field is a class, then
+                // it selects from the "first field map", which will have a placeholder
+                // type. Fields of structs, on the other hand, always select their own type.
+                CORINFO_CLASS_HANDLE fieldOwnerType = m_pComp->info.compCompHnd->getFieldClass(fieldHnd);
+
+                // TODO-VNTypes-Cleanup: this should use "eeIsValueClass", just SPMI didn't have the maps.
+                if ((m_pComp->info.compCompHnd->getClassAttribs(fieldOwnerType) & CORINFO_FLG_VALUECLASS) != 0)
+                {
+                    // We allow the selection of "actual" types for small types. But
+                    // only if they're guaranteed to be in the range of the small type.
+                    if (varTypeIsSmall(fieldType) && (typeOfValue != fieldType))
+                    {
+                        assert(typeOfValue == TYP_INT);
+                        if (IsVNConstant(value))
+                        {
+                            assert(FitsIn(fieldType, ConstantValue<int>(value)));
+                        }
+                        else
+                        {
+                            VNFuncApp valueFunc;
+                            assert(GetVNFunc(value, &valueFunc) && VNFuncIsNumericCast(valueFunc.m_func));
+                            var_types castToType;
+                            bool      srcIsUnsigned;
+                            GetCastOperFromVN(valueFunc.m_args[1], &castToType, &srcIsUnsigned);
+                            assert(castToType == fieldType);
+                        }
+                    }
+                    else
+                    {
+                        assert(typeOfValue == fieldType);
+                    }
+
+                    // Vector2/3/4 have fields. Opaque vectors too, for debugging support.
+                    assert(varTypeIsStruct(typeOfMap));
+                }
+                else
+                {
+                    assert((typeOfValue == TYP_MEM) && (typeOfMap == TYP_HEAP));
+                }
+            }
+        }
+        else
+        {
+            // If this is not a field, it must be an array equivalence class.
+            // Those yield "array equivalence maps" with placeholder types.
+            assert((handleFlags & GTF_ICON_CLASS_HDL) != 0);
+            assert((typeOfValue == TYP_MEM) && (typeOfMap == TYP_HEAP));
+        }
+    }
+    else if (genActualTypeIsIntOrI(TypeOfVN(index)))
+    {
+        // This is an array index, selecting from the "heap at array type at array object" map,
+        // the type yielded will be concrete (that of the array element, though we cannot verify this).
+        assert((typeOfMap == TYP_MEM) && (typeOfValue != TYP_MEM));
+    }
+    else if (TypeOfVN(index) == TYP_REF)
+    {
+        // This is an object which selects from the "first field map" or from the "array equivalence
+        // type map". The former selects concrete types, the latter - not, but we do not know which
+        // one this is... Note at least that both select from maps with placeholder types.
+        assert(typeOfMap == TYP_MEM);
+    }
+    else if (TypeOfVN(index) == TYP_BYREF)
+    {
+        // This is a "static offset" - appears when accessing static fields in shared generic code and
+        // representing, essentially, the "T" for which the field will be accessed. Selects concrete
+        // values from "the first field map" for such shared statics.
+        assert((typeOfMap == TYP_MEM) && (typeOfValue != TYP_MEM));
+    }
+    else
+    {
+        // If you are adding new usages of MapSelect/MapStore and
+        // hitting this, just add your new case to this method.
+        unreached();
+    }
+}
+#endif // DEBUG
 
 ValueNum ValueNumStore::EvalFuncForConstantArgs(var_types typ, VNFunc func, ValueNum arg0VN)
 {

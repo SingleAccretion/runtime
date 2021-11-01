@@ -591,6 +591,10 @@ public:
 
     ValueNum VNForFieldSelector(CORINFO_FIELD_HANDLE fieldHnd, var_types* pFieldType, size_t* pStructSize = nullptr);
 
+#ifdef DEBUG
+    void ValidateSelection(ValueNum map, ValueNum index, ValueNum value);
+#endif
+
     // These functions parallel the ones above, except that they take liberal/conservative VN pairs
     // as arguments, and return such a pair (the pair of the function applied to the liberal args, and
     // the function applied to the conservative args).
