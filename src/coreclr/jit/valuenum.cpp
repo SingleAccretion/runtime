@@ -4076,7 +4076,7 @@ ValueNum ValueNumStore::VNApplySelectors(ValueNumKind  vnk,
 // is "value", and it is being read through an indirection of "indType".
 //
 // Arguments:
-//    value           - (VN of) value the location has
+//    value           - (normal VN of) value the location has
 //    indType         - the type through which the location is being read
 //    valueStructSize - size of "value" if is of a struct type
 //
@@ -4091,28 +4091,28 @@ ValueNum ValueNumStore::VNApplySelectors(ValueNumKind  vnk,
 //
 ValueNum ValueNumStore::VNApplySelectorsTypeCheck(ValueNum value, var_types indType, size_t valueStructSize)
 {
+    assert(VNIsNormal(value));
+
     var_types typeOfValue = TypeOfVN(value);
 
     // Check if the typeOfValue is matching/compatible
 
     if (indType != typeOfValue)
     {
-        // We are trying to read from an 'elem' of type 'elemType' using 'indType' read
-
         size_t elemTypSize = (typeOfValue == TYP_STRUCT) ? valueStructSize : genTypeSize(typeOfValue);
         size_t indTypeSize = genTypeSize(indType);
 
         if (indTypeSize > elemTypSize)
         {
             // Reading beyong the end of "value", return a new unique value number.
-            value = VNMakeNormalUnique(value);
+            value = VNForExpr(m_pComp->compCurBB, indType);
 
             JITDUMP("    *** Mismatched types in VNApplySelectorsTypeCheck (reading beyond the end)\n");
         }
         else if (varTypeIsStruct(indType))
         {
             // We do not know how wide this indirection is - return a new unique value number.
-            value = VNMakeNormalUnique(value);
+            value = VNForExpr(m_pComp->compCurBB, indType);
 
             JITDUMP("    *** Mismatched types in VNApplySelectorsTypeCheck (indType is TYP_STRUCT)\n");
         }

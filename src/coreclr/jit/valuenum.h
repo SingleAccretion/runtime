@@ -501,6 +501,12 @@ public:
         return GetVNFunc(vn, &funcApp) && funcApp.m_func == VNF_ValWithExc;
     }
 
+    // Returns "true" iff "vn" is *not* an application of "VNF_ValWithExc".
+    bool VNIsNormal(ValueNum vn)
+    {
+        return !VNHasExc(vn);
+    }
+
     // If vn "excSet" is "VNForEmptyExcSet()" we just return "vn"
     // otherwise we use VNExcSetUnion to combine the exception sets of both "vn" and "excSet"
     // and return that ValueNum
