@@ -11099,6 +11099,8 @@ public:
     GenTree* fgMorphMultiregStructArg(GenTree* arg, fgArgTabEntry* fgEntryPtr);
 
     bool killGCRefs(GenTree* tree);
+
+    void RunBenchmarks();
 }; // end of class Compiler
 
 //---------------------------------------------------------------------------------------------------------------------

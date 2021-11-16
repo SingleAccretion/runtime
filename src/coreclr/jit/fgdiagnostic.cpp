@@ -3758,6 +3758,1765 @@ void Compiler::fgDebugCheckLoopTable()
         }
     }
 }
-
-/*****************************************************************************/
 #endif // DEBUG
+
+typedef GenTree::VisitResult VisitResult;
+
+template <typename TVisitor>
+void VisitOperandsOld(GenTree* node, TVisitor visitor)
+{
+    switch (node->OperGet())
+    {
+        // Leaf nodes
+        case GT_LCL_VAR:
+        case GT_LCL_FLD:
+        case GT_LCL_VAR_ADDR:
+        case GT_LCL_FLD_ADDR:
+        case GT_CATCH_ARG:
+        case GT_LABEL:
+        case GT_FTN_ADDR:
+        case GT_RET_EXPR:
+        case GT_CNS_INT:
+        case GT_CNS_LNG:
+        case GT_CNS_DBL:
+        case GT_CNS_STR:
+        case GT_MEMORYBARRIER:
+        case GT_JMP:
+        case GT_JCC:
+        case GT_SETCC:
+        case GT_NO_OP:
+        case GT_START_NONGC:
+        case GT_START_PREEMPTGC:
+        case GT_PROF_HOOK:
+#if !defined(FEATURE_EH_FUNCLETS)
+        case GT_END_LFIN:
+#endif // !FEATURE_EH_FUNCLETS
+        case GT_PHI_ARG:
+        case GT_JMPTABLE:
+        case GT_CLS_VAR:
+        case GT_CLS_VAR_ADDR:
+        case GT_ARGPLACE:
+        case GT_PHYSREG:
+        case GT_EMITNOP:
+        case GT_PINVOKE_PROLOG:
+        case GT_PINVOKE_EPILOG:
+        case GT_IL_OFFSET:
+            return;
+
+            // Unary operators with an optional operand
+        case GT_NOP:
+        case GT_FIELD:
+        case GT_RETURN:
+        case GT_RETFILT:
+            if (node->AsUnOp()->gtOp1 == nullptr)
+            {
+                return;
+            }
+            FALLTHROUGH;
+
+            // Standard unary operators
+        case GT_STORE_LCL_VAR:
+        case GT_STORE_LCL_FLD:
+        case GT_NOT:
+        case GT_NEG:
+        case GT_BSWAP:
+        case GT_BSWAP16:
+        case GT_COPY:
+        case GT_RELOAD:
+        case GT_ARR_LENGTH:
+        case GT_CAST:
+        case GT_BITCAST:
+        case GT_CKFINITE:
+        case GT_LCLHEAP:
+        case GT_ADDR:
+        case GT_IND:
+        case GT_OBJ:
+        case GT_BLK:
+        case GT_BOX:
+        case GT_ALLOCOBJ:
+        case GT_INIT_VAL:
+        case GT_JTRUE:
+        case GT_SWITCH:
+        case GT_NULLCHECK:
+        case GT_PUTARG_REG:
+        case GT_PUTARG_STK:
+        case GT_PUTARG_TYPE:
+#if FEATURE_ARG_SPLIT
+        case GT_PUTARG_SPLIT:
+#endif // FEATURE_ARG_SPLIT
+        case GT_RETURNTRAP:
+        case GT_KEEPALIVE:
+        case GT_INC_SATURATE:
+            visitor(node->AsUnOp()->gtOp1);
+            return;
+
+            // Variadic nodes
+// Variadic nodes
+#if defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+#if defined(FEATURE_SIMD)
+        case GT_SIMD:
+#endif
+#if defined(FEATURE_HW_INTRINSICS)
+        case GT_HWINTRINSIC:
+#endif
+            for (GenTree* operand : node->AsMultiOp()->Operands())
+            {
+                if (visitor(operand) == VisitResult::Abort)
+                {
+                    break;
+                }
+            }
+            return;
+#endif // defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+
+            // Special nodes
+        case GT_PHI:
+            for (GenTreePhi::Use& use : node->AsPhi()->Uses())
+            {
+                if (visitor(use.GetNode()) == VisitResult::Abort)
+                {
+                    break;
+                }
+            }
+            return;
+
+        case GT_FIELD_LIST:
+            for (GenTreeFieldList::Use& field : node->AsFieldList()->Uses())
+            {
+                if (visitor(field.GetNode()) == VisitResult::Abort)
+                {
+                    break;
+                }
+            }
+            return;
+
+        case GT_CMPXCHG:
+        {
+            GenTreeCmpXchg* const cmpXchg = node->AsCmpXchg();
+            if (visitor(cmpXchg->gtOpLocation) == VisitResult::Abort)
+            {
+                return;
+            }
+            if (visitor(cmpXchg->gtOpValue) == VisitResult::Abort)
+            {
+                return;
+            }
+            visitor(cmpXchg->gtOpComparand);
+            return;
+        }
+
+        case GT_ARR_ELEM:
+        {
+            GenTreeArrElem* const arrElem = node->AsArrElem();
+            if (visitor(arrElem->gtArrObj) == VisitResult::Abort)
+            {
+                return;
+            }
+            for (unsigned i = 0; i < arrElem->gtArrRank; i++)
+            {
+                if (visitor(arrElem->gtArrInds[i]) == VisitResult::Abort)
+                {
+                    return;
+                }
+            }
+            return;
+        }
+
+        case GT_ARR_OFFSET:
+        {
+            GenTreeArrOffs* const arrOffs = node->AsArrOffs();
+            if (visitor(arrOffs->gtOffset) == VisitResult::Abort)
+            {
+                return;
+            }
+            if (visitor(arrOffs->gtIndex) == VisitResult::Abort)
+            {
+                return;
+            }
+            visitor(arrOffs->gtArrObj);
+            return;
+        }
+
+        case GT_DYN_BLK:
+        {
+            GenTreeDynBlk* const dynBlock = node->AsDynBlk();
+            if (visitor(dynBlock->gtOp1) == VisitResult::Abort)
+            {
+                return;
+            }
+            visitor(dynBlock->gtDynamicSize);
+            return;
+        }
+
+        case GT_STORE_DYN_BLK:
+        {
+            GenTreeDynBlk* const dynBlock = node->AsDynBlk();
+            if (visitor(dynBlock->gtOp1) == VisitResult::Abort)
+            {
+                return;
+            }
+            if (visitor(dynBlock->gtOp2) == VisitResult::Abort)
+            {
+                return;
+            }
+            visitor(dynBlock->gtDynamicSize);
+            return;
+        }
+
+        case GT_CALL:
+        {
+            GenTreeCall* const call = node->AsCall();
+            if ((call->gtCallThisArg != nullptr) && (visitor(call->gtCallThisArg->GetNode()) == VisitResult::Abort))
+            {
+                return;
+            }
+
+            for (GenTreeCall::Use& use : call->Args())
+            {
+                if (visitor(use.GetNode()) == VisitResult::Abort)
+                {
+                    return;
+                }
+            }
+
+            for (GenTreeCall::Use& use : call->LateArgs())
+            {
+                if (visitor(use.GetNode()) == VisitResult::Abort)
+                {
+                    return;
+                }
+            }
+
+            if (call->gtCallType == CT_INDIRECT)
+            {
+                if ((call->gtCallCookie != nullptr) && (visitor(call->gtCallCookie) == VisitResult::Abort))
+                {
+                    return;
+                }
+                if ((call->gtCallAddr != nullptr) && (visitor(call->gtCallAddr) == VisitResult::Abort))
+                {
+                    return;
+                }
+            }
+            if ((call->gtControlExpr != nullptr))
+            {
+                visitor(call->gtControlExpr);
+            }
+            return;
+        }
+
+        // Binary nodes
+        default:
+        {
+            assert(node->OperIsBinary());
+            GenTreeOp* const op = node->AsOp();
+
+            GenTree* const op1 = op->gtOp1;
+            if ((op1 != nullptr) && (visitor(op1) == VisitResult::Abort))
+            {
+                return;
+            }
+
+            GenTree* const op2 = op->gtOp2;
+            if (op2 != nullptr)
+            {
+                visitor(op2);
+            }
+
+            return;
+        }
+    }
+}
+
+template <typename TVisitor>
+void VisitOperandsWithKinds(GenTree* node, TVisitor visitor)
+{
+    unsigned kind = node->OperKind();
+
+    if (kind & GTK_LEAF)
+    {
+        return;
+    }
+
+    if (kind & GTK_UNOP)
+    {
+        GenTree* op1 = node->AsUnOp()->gtOp1;
+        if (op1 != nullptr)
+        {
+            visitor(op1);
+        }
+        return;
+    }
+
+    if (kind & GTK_BINOP)
+    {
+        GenTree* op1 = node->AsOp()->gtOp1;
+        if ((op1 != nullptr) && visitor(op1) == GenTree::VisitResult::Abort)
+        {
+            return;
+        }
+
+        GenTree* op2 = node->AsOp()->gtOp2;
+        if (op2 != nullptr)
+        {
+            visitor(op2);
+        }
+        return;
+    }
+
+    switch (node->OperGet())
+    {
+        // Variadic nodes
+// Variadic nodes
+#if defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+#if defined(FEATURE_SIMD)
+        case GT_SIMD:
+#endif
+#if defined(FEATURE_HW_INTRINSICS)
+        case GT_HWINTRINSIC:
+#endif
+            for (GenTree* operand : node->AsMultiOp()->Operands())
+            {
+                if (visitor(operand) == VisitResult::Abort)
+                {
+                    break;
+                }
+            }
+            return;
+#endif // defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+
+            // Special nodes
+        case GT_PHI:
+            for (GenTreePhi::Use& use : node->AsPhi()->Uses())
+            {
+                if (visitor(use.GetNode()) == VisitResult::Abort)
+                {
+                    break;
+                }
+            }
+            return;
+
+        case GT_FIELD_LIST:
+            for (GenTreeFieldList::Use& field : node->AsFieldList()->Uses())
+            {
+                if (visitor(field.GetNode()) == VisitResult::Abort)
+                {
+                    break;
+                }
+            }
+            return;
+
+        case GT_CMPXCHG:
+        {
+            GenTreeCmpXchg* const cmpXchg = node->AsCmpXchg();
+            if (visitor(cmpXchg->gtOpLocation) == VisitResult::Abort)
+            {
+                return;
+            }
+            if (visitor(cmpXchg->gtOpValue) == VisitResult::Abort)
+            {
+                return;
+            }
+            visitor(cmpXchg->gtOpComparand);
+            return;
+        }
+
+        case GT_ARR_ELEM:
+        {
+            GenTreeArrElem* const arrElem = node->AsArrElem();
+            if (visitor(arrElem->gtArrObj) == VisitResult::Abort)
+            {
+                return;
+            }
+            for (unsigned i = 0; i < arrElem->gtArrRank; i++)
+            {
+                if (visitor(arrElem->gtArrInds[i]) == VisitResult::Abort)
+                {
+                    return;
+                }
+            }
+            return;
+        }
+
+        case GT_ARR_OFFSET:
+        {
+            GenTreeArrOffs* const arrOffs = node->AsArrOffs();
+            if (visitor(arrOffs->gtOffset) == VisitResult::Abort)
+            {
+                return;
+            }
+            if (visitor(arrOffs->gtIndex) == VisitResult::Abort)
+            {
+                return;
+            }
+            visitor(arrOffs->gtArrObj);
+            return;
+        }
+
+        case GT_DYN_BLK:
+        {
+            GenTreeDynBlk* const dynBlock = node->AsDynBlk();
+            if (visitor(dynBlock->gtOp1) == VisitResult::Abort)
+            {
+                return;
+            }
+            visitor(dynBlock->gtDynamicSize);
+            return;
+        }
+
+        case GT_STORE_DYN_BLK:
+        {
+            GenTreeDynBlk* const dynBlock = node->AsDynBlk();
+            if (visitor(dynBlock->gtOp1) == VisitResult::Abort)
+            {
+                return;
+            }
+            if (visitor(dynBlock->gtOp2) == VisitResult::Abort)
+            {
+                return;
+            }
+            visitor(dynBlock->gtDynamicSize);
+            return;
+        }
+
+        case GT_CALL:
+        {
+            GenTreeCall* const call = node->AsCall();
+            if ((call->gtCallThisArg != nullptr) && (visitor(call->gtCallThisArg->GetNode()) == VisitResult::Abort))
+            {
+                return;
+            }
+
+            for (GenTreeCall::Use& use : call->Args())
+            {
+                if (visitor(use.GetNode()) == VisitResult::Abort)
+                {
+                    return;
+                }
+            }
+
+            for (GenTreeCall::Use& use : call->LateArgs())
+            {
+                if (visitor(use.GetNode()) == VisitResult::Abort)
+                {
+                    return;
+                }
+            }
+
+            if (call->gtCallType == CT_INDIRECT)
+            {
+                if ((call->gtCallCookie != nullptr) && (visitor(call->gtCallCookie) == VisitResult::Abort))
+                {
+                    return;
+                }
+                if ((call->gtCallAddr != nullptr) && (visitor(call->gtCallAddr) == VisitResult::Abort))
+                {
+                    return;
+                }
+            }
+            if ((call->gtControlExpr != nullptr))
+            {
+                visitor(call->gtControlExpr);
+            }
+            return;
+        }
+
+        default:
+        {
+            unreached();
+        }
+    }
+}
+
+template <typename TVisitor>
+class TreeVisitorOld
+{
+private:
+    enum
+    {
+        DoLclVarsOnly     = false,
+        UseExecutionOrder = false,
+    };
+
+    Compiler::fgWalkResult VisitorPreOrder(GenTree** use, GenTree* user)
+    {
+        return reinterpret_cast<TVisitor*>(this)->PreOrderVisitImpl(use, user);
+    }
+
+    Compiler::fgWalkResult VisitorPostOrder(GenTree** use, GenTree* user, Compiler::fgWalkResult result)
+    {
+        return reinterpret_cast<TVisitor*>(this)->PostOrderVisitImpl(use, user, result);
+    }
+
+public:
+    Compiler::fgWalkResult WalkTree(GenTree** use, GenTree* user)
+    {
+        assert(use != nullptr);
+
+        GenTree* node = *use;
+
+        Compiler:: result = WALK_CONTINUE;
+        if (!TVisitor::DoLclVarsOnly)
+        {
+            result = VisitorPreOrder(use, user);
+            if (result == Compiler::WALK_ABORT)
+            {
+                return result;
+            }
+
+            node = *use;
+            if ((node == nullptr) || (result == WALK_SKIP_SUBTREES))
+            {
+                goto DONE;
+            }
+        }
+
+        switch (node->OperGet())
+        {
+            // Leaf lclVars
+            case GT_LCL_VAR:
+            case GT_LCL_FLD:
+            case GT_LCL_VAR_ADDR:
+            case GT_LCL_FLD_ADDR:
+                if (TVisitor::DoLclVarsOnly)
+                {
+                    result = VisitorPreOrder(use, user);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+                FALLTHROUGH;
+
+                // Leaf nodes
+            case GT_CATCH_ARG:
+            case GT_LABEL:
+            case GT_FTN_ADDR:
+            case GT_RET_EXPR:
+            case GT_CNS_INT:
+            case GT_CNS_LNG:
+            case GT_CNS_DBL:
+            case GT_CNS_STR:
+            case GT_MEMORYBARRIER:
+            case GT_JMP:
+            case GT_JCC:
+            case GT_SETCC:
+            case GT_NO_OP:
+            case GT_START_NONGC:
+            case GT_START_PREEMPTGC:
+            case GT_PROF_HOOK:
+#if !defined(FEATURE_EH_FUNCLETS)
+            case GT_END_LFIN:
+#endif // !FEATURE_EH_FUNCLETS
+            case GT_PHI_ARG:
+            case GT_JMPTABLE:
+            case GT_CLS_VAR:
+            case GT_CLS_VAR_ADDR:
+            case GT_ARGPLACE:
+            case GT_PHYSREG:
+            case GT_EMITNOP:
+            case GT_PINVOKE_PROLOG:
+            case GT_PINVOKE_EPILOG:
+            case GT_IL_OFFSET:
+                break;
+
+                // Unary operators with an optional operand
+            case GT_NOP:
+            case GT_FIELD:
+            case GT_RETURN:
+            case GT_RETFILT:
+                if (node->AsUnOp()->gtOp1 == nullptr)
+                {
+                    break;
+                }
+                goto VISIT_UNOP_OPERAND;
+
+                // Lclvar unary operators
+            case GT_STORE_LCL_VAR:
+            case GT_STORE_LCL_FLD:
+                if (TVisitor::DoLclVarsOnly)
+                {
+                    result = VisitorPreOrder(use, user);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+                goto VISIT_UNOP_OPERAND;
+
+                // Standard unary operators
+            case GT_NOT:
+            case GT_NEG:
+            case GT_BSWAP:
+            case GT_BSWAP16:
+            case GT_COPY:
+            case GT_RELOAD:
+            case GT_ARR_LENGTH:
+            case GT_CAST:
+            case GT_BITCAST:
+            case GT_CKFINITE:
+            case GT_LCLHEAP:
+            case GT_ADDR:
+            case GT_IND:
+            case GT_OBJ:
+            case GT_BLK:
+            case GT_BOX:
+            case GT_ALLOCOBJ:
+            case GT_INIT_VAL:
+            case GT_JTRUE:
+            case GT_SWITCH:
+            case GT_NULLCHECK:
+            case GT_PUTARG_REG:
+            case GT_PUTARG_STK:
+            case GT_PUTARG_TYPE:
+            case GT_RETURNTRAP:
+            case GT_RUNTIMELOOKUP:
+            case GT_KEEPALIVE:
+            case GT_INC_SATURATE:
+            VISIT_UNOP_OPERAND:
+            {
+                GenTreeUnOp* const unOp = node->AsUnOp();
+                result = WalkTree(&unOp->gtOp1, unOp);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                break;
+            }
+
+            // Special nodes
+            case GT_PHI:
+                for (GenTreePhi::Use& use : node->AsPhi()->Uses())
+                {
+                    result = WalkTree(&use.NodeRef(), node);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+                break;
+
+            case GT_FIELD_LIST:
+                for (GenTreeFieldList::Use& use : node->AsFieldList()->Uses())
+                {
+                    result = WalkTree(&use.NodeRef(), node);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+                break;
+
+            case GT_CMPXCHG:
+            {
+                GenTreeCmpXchg* const cmpXchg = node->AsCmpXchg();
+
+                result = WalkTree(&cmpXchg->gtOpLocation, cmpXchg);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                result = WalkTree(&cmpXchg->gtOpValue, cmpXchg);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                result = WalkTree(&cmpXchg->gtOpComparand, cmpXchg);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                break;
+            }
+
+            case GT_ARR_ELEM:
+            {
+                GenTreeArrElem* const arrElem = node->AsArrElem();
+
+                result = WalkTree(&arrElem->gtArrObj, arrElem);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+
+                const unsigned rank = arrElem->gtArrRank;
+                for (unsigned dim = 0; dim < rank; dim++)
+                {
+                    result = WalkTree(&arrElem->gtArrInds[dim], arrElem);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+                break;
+            }
+
+            case GT_ARR_OFFSET:
+            {
+                GenTreeArrOffs* const arrOffs = node->AsArrOffs();
+
+                result = WalkTree(&arrOffs->gtOffset, arrOffs);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                result = WalkTree(&arrOffs->gtIndex, arrOffs);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                result = WalkTree(&arrOffs->gtArrObj, arrOffs);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                break;
+            }
+
+            case GT_DYN_BLK:
+            {
+                GenTreeDynBlk* const dynBlock = node->AsDynBlk();
+
+                GenTree** op1Use = &dynBlock->gtOp1;
+                GenTree** op2Use = &dynBlock->gtDynamicSize;
+
+                if (TVisitor::UseExecutionOrder && dynBlock->gtEvalSizeFirst)
+                {
+                    std::swap(op1Use, op2Use);
+                }
+
+                result = WalkTree(op1Use, dynBlock);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                result = WalkTree(op2Use, dynBlock);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                break;
+            }
+
+            case GT_STORE_DYN_BLK:
+            {
+                GenTreeDynBlk* const dynBlock = node->AsDynBlk();
+
+                GenTree** op1Use = &dynBlock->gtOp1;
+                GenTree** op2Use = &dynBlock->gtOp2;
+                GenTree** op3Use = &dynBlock->gtDynamicSize;
+
+                if (TVisitor::UseExecutionOrder)
+                {
+                    if (dynBlock->IsReverseOp())
+                    {
+                        std::swap(op1Use, op2Use);
+                    }
+                    if (dynBlock->gtEvalSizeFirst)
+                    {
+                        std::swap(op3Use, op2Use);
+                        std::swap(op2Use, op1Use);
+                    }
+                }
+
+                result = WalkTree(op1Use, dynBlock);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                result = WalkTree(op2Use, dynBlock);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                result = WalkTree(op3Use, dynBlock);
+                if (result == Compiler::WALK_ABORT)
+                {
+                    return result;
+                }
+                break;
+            }
+
+            case GT_CALL:
+            {
+                GenTreeCall* const call = node->AsCall();
+
+                if (call->gtCallThisArg != nullptr)
+                {
+                    result = WalkTree(&call->gtCallThisArg->NodeRef(), call);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+
+                for (GenTreeCall::Use& use : call->Args())
+                {
+                    result = WalkTree(&use.NodeRef(), call);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+
+                for (GenTreeCall::Use& use : call->LateArgs())
+                {
+                    result = WalkTree(&use.NodeRef(), call);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+
+                if (call->gtCallType == CT_INDIRECT)
+                {
+                    if (call->gtCallCookie != nullptr)
+                    {
+                        result = WalkTree(&call->gtCallCookie, call);
+                        if (result == Compiler::WALK_ABORT)
+                        {
+                            return result;
+                        }
+                    }
+
+                    result = WalkTree(&call->gtCallAddr, call);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+
+                if (call->gtControlExpr != nullptr)
+                {
+                    result = WalkTree(&call->gtControlExpr, call);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+
+                break;
+            }
+
+#if defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+#if defined(FEATURE_SIMD)
+            case GT_SIMD:
+#endif
+#if defined(FEATURE_HW_INTRINSICS)
+            case GT_HWINTRINSIC:
+#endif
+                if (TVisitor::UseExecutionOrder && node->IsReverseOp())
+                {
+                    assert(node->AsMultiOp()->GetOperandCount() == 2);
+
+                    result = WalkTree(&node->AsMultiOp()->Op(2), node);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                    result = WalkTree(&node->AsMultiOp()->Op(1), node);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+                else
+                {
+                    for (GenTree** use : node->AsMultiOp()->UseEdges())
+                    {
+                        result = WalkTree(use, node);
+                        if (result == Compiler::WALK_ABORT)
+                        {
+                            return result;
+                        }
+                    }
+                }
+                break;
+#endif // defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+
+                // Binary nodes
+            default:
+            {
+                assert(node->OperIsBinary());
+
+                GenTreeOp* const op = node->AsOp();
+
+                GenTree** op1Use = &op->gtOp1;
+                GenTree** op2Use = &op->gtOp2;
+
+                if (TVisitor::UseExecutionOrder && node->IsReverseOp())
+                {
+                    std::swap(op1Use, op2Use);
+                }
+
+                if (*op1Use != nullptr)
+                {
+                    result = WalkTree(op1Use, op);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+
+                if (*op2Use != nullptr)
+                {
+                    result = WalkTree(op2Use, op);
+                    if (result == Compiler::WALK_ABORT)
+                    {
+                        return result;
+                    }
+                }
+                break;
+            }
+        }
+
+    DONE:
+        // Finally, visit the current node
+        result = VisitorPostOrder(use, user, result);
+
+        return result;
+    }
+};
+
+bool TryGetUseOld(GenTree* node, GenTree* def, GenTree*** pUse)
+{
+    assert(def != nullptr);
+    assert(pUse != nullptr);
+
+    switch (node->OperGet())
+    {
+        // Leaf nodes
+        case GT_LCL_VAR:
+        case GT_LCL_FLD:
+        case GT_LCL_VAR_ADDR:
+        case GT_LCL_FLD_ADDR:
+        case GT_CATCH_ARG:
+        case GT_LABEL:
+        case GT_FTN_ADDR:
+        case GT_RET_EXPR:
+        case GT_CNS_INT:
+        case GT_CNS_LNG:
+        case GT_CNS_DBL:
+        case GT_CNS_STR:
+        case GT_MEMORYBARRIER:
+        case GT_JMP:
+        case GT_JCC:
+        case GT_SETCC:
+        case GT_NO_OP:
+        case GT_START_NONGC:
+        case GT_START_PREEMPTGC:
+        case GT_PROF_HOOK:
+#if !defined(FEATURE_EH_FUNCLETS)
+        case GT_END_LFIN:
+#endif // !FEATURE_EH_FUNCLETS
+        case GT_PHI_ARG:
+        case GT_JMPTABLE:
+        case GT_CLS_VAR:
+        case GT_CLS_VAR_ADDR:
+        case GT_ARGPLACE:
+        case GT_PHYSREG:
+        case GT_EMITNOP:
+        case GT_PINVOKE_PROLOG:
+        case GT_PINVOKE_EPILOG:
+        case GT_IL_OFFSET:
+            return false;
+
+            // Standard unary operators
+        case GT_STORE_LCL_VAR:
+        case GT_STORE_LCL_FLD:
+        case GT_NOT:
+        case GT_NEG:
+        case GT_COPY:
+        case GT_RELOAD:
+        case GT_ARR_LENGTH:
+        case GT_CAST:
+        case GT_BITCAST:
+        case GT_CKFINITE:
+        case GT_LCLHEAP:
+        case GT_ADDR:
+        case GT_IND:
+        case GT_OBJ:
+        case GT_BLK:
+        case GT_BOX:
+        case GT_ALLOCOBJ:
+        case GT_RUNTIMELOOKUP:
+        case GT_INIT_VAL:
+        case GT_JTRUE:
+        case GT_SWITCH:
+        case GT_NULLCHECK:
+        case GT_PUTARG_REG:
+        case GT_PUTARG_STK:
+        case GT_PUTARG_TYPE:
+        case GT_RETURNTRAP:
+        case GT_NOP:
+        case GT_RETURN:
+        case GT_RETFILT:
+        case GT_BSWAP:
+        case GT_BSWAP16:
+        case GT_KEEPALIVE:
+        case GT_INC_SATURATE:
+            if (def == node->AsUnOp()->gtOp1)
+            {
+                *pUse = &node->AsUnOp()->gtOp1;
+                return true;
+            }
+            return false;
+
+            // Variadic nodes
+#if FEATURE_ARG_SPLIT
+        case GT_PUTARG_SPLIT:
+            if (node->AsUnOp()->gtOp1->gtOper == GT_FIELD_LIST)
+            {
+                return node->AsUnOp()->gtOp1->TryGetUse(def, pUse);
+            }
+            if (def == node->AsUnOp()->gtOp1)
+            {
+                *pUse = &node->AsUnOp()->gtOp1;
+                return true;
+            }
+            return false;
+#endif // FEATURE_ARG_SPLIT
+
+#if defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+#if defined(FEATURE_SIMD)
+        case GT_SIMD:
+#endif
+#if defined(FEATURE_HW_INTRINSICS)
+        case GT_HWINTRINSIC:
+#endif
+            for (GenTree** opUse : node->AsMultiOp()->UseEdges())
+            {
+                if (*opUse == def)
+                {
+                    *pUse = opUse;
+                    return true;
+                }
+            }
+            return false;
+#endif // defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+
+            // Special nodes
+        case GT_PHI:
+            for (GenTreePhi::Use& phiUse : node->AsPhi()->Uses())
+            {
+                if (phiUse.GetNode() == def)
+                {
+                    *pUse = &phiUse.NodeRef();
+                    return true;
+                }
+            }
+            return false;
+
+        case GT_FIELD_LIST:
+            for (GenTreeFieldList::Use& fieldUse : node->AsFieldList()->Uses())
+            {
+                if (fieldUse.GetNode() == def)
+                {
+                    *pUse = &fieldUse.NodeRef();
+                    return true;
+                }
+            }
+            return false;
+
+        case GT_CMPXCHG:
+        {
+            GenTreeCmpXchg* const cmpXchg = node->AsCmpXchg();
+            if (def == cmpXchg->gtOpLocation)
+            {
+                *pUse = &cmpXchg->gtOpLocation;
+                return true;
+            }
+            if (def == cmpXchg->gtOpValue)
+            {
+                *pUse = &cmpXchg->gtOpValue;
+                return true;
+            }
+            if (def == cmpXchg->gtOpComparand)
+            {
+                *pUse = &cmpXchg->gtOpComparand;
+                return true;
+            }
+            return false;
+        }
+
+        case GT_ARR_ELEM:
+        {
+            GenTreeArrElem* const arrElem = node->AsArrElem();
+            if (def == arrElem->gtArrObj)
+            {
+                *pUse = &arrElem->gtArrObj;
+                return true;
+            }
+            for (unsigned i = 0; i < arrElem->gtArrRank; i++)
+            {
+                if (def == arrElem->gtArrInds[i])
+                {
+                    *pUse = &arrElem->gtArrInds[i];
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        case GT_ARR_OFFSET:
+        {
+            GenTreeArrOffs* const arrOffs = node->AsArrOffs();
+            if (def == arrOffs->gtOffset)
+            {
+                *pUse = &arrOffs->gtOffset;
+                return true;
+            }
+            if (def == arrOffs->gtIndex)
+            {
+                *pUse = &arrOffs->gtIndex;
+                return true;
+            }
+            if (def == arrOffs->gtArrObj)
+            {
+                *pUse = &arrOffs->gtArrObj;
+                return true;
+            }
+            return false;
+        }
+
+        case GT_DYN_BLK:
+        {
+            GenTreeDynBlk* const dynBlock = node->AsDynBlk();
+            if (def == dynBlock->gtOp1)
+            {
+                *pUse = &dynBlock->gtOp1;
+                return true;
+            }
+            if (def == dynBlock->gtDynamicSize)
+            {
+                *pUse = &dynBlock->gtDynamicSize;
+                return true;
+            }
+            return false;
+        }
+
+        case GT_STORE_DYN_BLK:
+        {
+            GenTreeDynBlk* const dynBlock = node->AsDynBlk();
+            if (def == dynBlock->gtOp1)
+            {
+                *pUse = &dynBlock->gtOp1;
+                return true;
+            }
+            if (def == dynBlock->gtOp2)
+            {
+                *pUse = &dynBlock->gtOp2;
+                return true;
+            }
+            if (def == dynBlock->gtDynamicSize)
+            {
+                *pUse = &dynBlock->gtDynamicSize;
+                return true;
+            }
+            return false;
+        }
+
+        case GT_CALL:
+        {
+            GenTreeCall* const call = node->AsCall();
+            if ((call->gtCallThisArg != nullptr) && (def == call->gtCallThisArg->GetNode()))
+            {
+                *pUse = &call->gtCallThisArg->NodeRef();
+                return true;
+            }
+            if (def == call->gtControlExpr)
+            {
+                *pUse = &call->gtControlExpr;
+                return true;
+            }
+            if (call->gtCallType == CT_INDIRECT)
+            {
+                if (def == call->gtCallCookie)
+                {
+                    *pUse = &call->gtCallCookie;
+                    return true;
+                }
+                if (def == call->gtCallAddr)
+                {
+                    *pUse = &call->gtCallAddr;
+                    return true;
+                }
+            }
+            for (GenTreeCall::Use& argUse : call->Args())
+            {
+                if (argUse.GetNode() == def)
+                {
+                    *pUse = &argUse.NodeRef();
+                    return true;
+                }
+            }
+            for (GenTreeCall::Use& argUse : call->LateArgs())
+            {
+                if (argUse.GetNode() == def)
+                {
+                    *pUse = &argUse.NodeRef();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Binary nodes
+        default:
+        {
+            assert(def != nullptr);
+            assert(pUse != nullptr);
+            assert(node->OperIsBinary());
+
+            GenTreeOp* const binOp = node->AsOp();
+            if (def == binOp->gtOp1)
+            {
+                *pUse = &binOp->gtOp1;
+                return true;
+            }
+            if (def == binOp->gtOp2)
+            {
+                *pUse = &binOp->gtOp2;
+                return true;
+            }
+            return false;
+        }
+    }
+}
+
+bool gtHasRefOld(GenTree* tree, ssize_t lclNum, bool defOnly)
+{
+    genTreeOps oper;
+    unsigned   kind;
+
+AGAIN:
+
+    assert(tree);
+
+    oper = tree->OperGet();
+    kind = tree->OperKind();
+
+    /* Is this a constant node? */
+
+    if (kind & GTK_CONST)
+    {
+        return false;
+    }
+
+    /* Is this a leaf node? */
+
+    if (kind & GTK_LEAF)
+    {
+        if (oper == GT_LCL_VAR)
+        {
+            if (tree->AsLclVarCommon()->GetLclNum() == (unsigned)lclNum)
+            {
+                if (!defOnly)
+                {
+                    return true;
+                }
+            }
+        }
+        else if (oper == GT_RET_EXPR)
+        {
+            return gtHasRefOld(tree->AsRetExpr()->gtInlineCandidate, lclNum, defOnly);
+        }
+
+        return false;
+    }
+
+    /* Is it a 'simple' unary/binary operator? */
+
+    if (kind & GTK_SMPOP)
+    {
+        // Code in importation (see CEE_STFLD in impImportBlockCode), when
+        // spilling, can pass us "lclNum" that is actually a field handle...
+        if (tree->OperIs(GT_FIELD) && (lclNum == (ssize_t)tree->AsField()->gtFldHnd) && !defOnly)
+        {
+            return true;
+        }
+
+        if (tree->gtGetOp2IfPresent())
+        {
+            if (gtHasRefOld(tree->AsOp()->gtOp1, lclNum, defOnly))
+            {
+                return true;
+            }
+
+            tree = tree->AsOp()->gtOp2;
+            goto AGAIN;
+        }
+        else
+        {
+            tree = tree->AsOp()->gtOp1;
+
+            if (!tree)
+            {
+                return false;
+            }
+
+            if (oper == GT_ASG)
+            {
+                // 'tree' is the gtOp1 of an assignment node. So we can handle
+                // the case where defOnly is either true or false.
+
+                if (tree->gtOper == GT_LCL_VAR && tree->AsLclVarCommon()->GetLclNum() == (unsigned)lclNum)
+                {
+                    return true;
+                }
+                else if (tree->gtOper == GT_FIELD && lclNum == (ssize_t)tree->AsField()->gtFldHnd)
+                {
+                    return true;
+                }
+            }
+
+            goto AGAIN;
+        }
+    }
+
+    /* See what kind of a special operator we have here */
+
+    switch (oper)
+    {
+        case GT_CALL:
+            if (tree->AsCall()->gtCallThisArg != nullptr)
+            {
+                if (gtHasRefOld(tree->AsCall()->gtCallThisArg->GetNode(), lclNum, defOnly))
+                {
+                    return true;
+                }
+            }
+
+            for (GenTreeCall::Use& use : tree->AsCall()->Args())
+            {
+                if (gtHasRefOld(use.GetNode(), lclNum, defOnly))
+                {
+                    return true;
+                }
+            }
+
+            for (GenTreeCall::Use& use : tree->AsCall()->LateArgs())
+            {
+                if (gtHasRefOld(use.GetNode(), lclNum, defOnly))
+                {
+                    return true;
+                }
+            }
+
+            if (tree->AsCall()->gtControlExpr)
+            {
+                if (gtHasRefOld(tree->AsCall()->gtControlExpr, lclNum, defOnly))
+                {
+                    return true;
+                }
+            }
+
+            if (tree->AsCall()->gtCallType == CT_INDIRECT)
+            {
+                // pinvoke-calli cookie is a constant, or constant indirection
+                assert(tree->AsCall()->gtCallCookie == nullptr || tree->AsCall()->gtCallCookie->gtOper == GT_CNS_INT ||
+                       tree->AsCall()->gtCallCookie->gtOper == GT_IND);
+
+                tree = tree->AsCall()->gtCallAddr;
+            }
+            else
+            {
+                tree = nullptr;
+            }
+
+            if (tree)
+            {
+                goto AGAIN;
+            }
+
+            break;
+
+#if defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+#if defined(FEATURE_SIMD)
+        case GT_SIMD:
+#endif
+#if defined(FEATURE_HW_INTRINSICS)
+        case GT_HWINTRINSIC:
+#endif
+            for (GenTree* operand : tree->AsMultiOp()->Operands())
+            {
+                if (gtHasRefOld(operand, lclNum, defOnly))
+                {
+                    return true;
+                }
+            }
+            break;
+#endif // defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+
+        case GT_ARR_ELEM:
+            if (gtHasRefOld(tree->AsArrElem()->gtArrObj, lclNum, defOnly))
+            {
+                return true;
+            }
+
+            unsigned dim;
+            for (dim = 0; dim < tree->AsArrElem()->gtArrRank; dim++)
+            {
+                if (gtHasRefOld(tree->AsArrElem()->gtArrInds[dim], lclNum, defOnly))
+                {
+                    return true;
+                }
+            }
+
+            break;
+
+        case GT_ARR_OFFSET:
+            if (gtHasRefOld(tree->AsArrOffs()->gtOffset, lclNum, defOnly) ||
+                gtHasRefOld(tree->AsArrOffs()->gtIndex, lclNum, defOnly) ||
+                gtHasRefOld(tree->AsArrOffs()->gtArrObj, lclNum, defOnly))
+            {
+                return true;
+            }
+            break;
+
+        case GT_PHI:
+            for (GenTreePhi::Use& use : tree->AsPhi()->Uses())
+            {
+                if (gtHasRefOld(use.GetNode(), lclNum, defOnly))
+                {
+                    return true;
+                }
+            }
+            break;
+
+        case GT_FIELD_LIST:
+            for (GenTreeFieldList::Use& use : tree->AsFieldList()->Uses())
+            {
+                if (gtHasRefOld(use.GetNode(), lclNum, defOnly))
+                {
+                    return true;
+                }
+            }
+            break;
+
+        case GT_CMPXCHG:
+            if (gtHasRefOld(tree->AsCmpXchg()->gtOpLocation, lclNum, defOnly))
+            {
+                return true;
+            }
+            if (gtHasRefOld(tree->AsCmpXchg()->gtOpValue, lclNum, defOnly))
+            {
+                return true;
+            }
+            if (gtHasRefOld(tree->AsCmpXchg()->gtOpComparand, lclNum, defOnly))
+            {
+                return true;
+            }
+            break;
+
+        case GT_STORE_DYN_BLK:
+            if (gtHasRefOld(tree->AsDynBlk()->Data(), lclNum, defOnly))
+            {
+                return true;
+            }
+            FALLTHROUGH;
+        case GT_DYN_BLK:
+            if (gtHasRefOld(tree->AsDynBlk()->Addr(), lclNum, defOnly))
+            {
+                return true;
+            }
+            if (gtHasRefOld(tree->AsDynBlk()->gtDynamicSize, lclNum, defOnly))
+            {
+                return true;
+            }
+            break;
+
+        default:
+#ifdef DEBUG
+            JitTls::GetCompiler()->gtDispTree(tree);
+#endif
+            assert(!"unexpected operator");
+    }
+
+    return false;
+}
+
+template <typename Func>
+double MeasureTime(Func func, size_t repeatCount)
+{
+    PerfCounter counter{};
+
+    counter.Start();
+
+    for (size_t i = 0; i < repeatCount; i++)
+    {
+        func();
+    }
+
+    return counter.ElapsedTime();
+}
+
+//------------------------------------------------------------------------------
+// RunBenchmarks - DEBUG method to benchmark various compiler routines. Called just
+//                 after SET_BLOCK_ORDER so that there is useful IR to work with.
+//
+void Compiler::RunBenchmarks()
+{
+    const size_t RepeatCount = 20000;
+#ifdef DEBUG
+    const bool RunBenchmarks = true;
+#else
+    const bool RunBenchmarks = true;
+#endif
+
+    if (!RunBenchmarks)
+    {
+        return;
+    }
+
+#define OPERAND_BENCH_SIMPLE 0
+#define OPERAND_BENCH_SIMPLE_CAPTURE 0
+#define OPERAND_BENCH_RANDOM 1
+#define OPERAND_BENCH_MULTI 0
+#define VISITOR_BENCH 0
+#define TRY_GET_USE_BENCH 0
+#define HAS_REF_BENCH 0
+
+#define RUN_BENCH(benchName, action) auto benchName = [&]() {       \
+        unsigned count = 0;                                         \
+        for (BasicBlock* block : Blocks())                          \
+            for (Statement* stmt : block->Statements())             \
+                for (GenTree* node : stmt->TreeList())              \
+                {                                                   \
+                    action                                          \
+                }                                                   \
+        return count;                                               \
+    };                                                              \
+    auto benchName##Time = MeasureTime(benchName, RepeatCount);
+
+#if OPERAND_BENCH_SIMPLE
+    RUN_BENCH(benchOldOperands, VisitOperandsOld(node, [](GenTree* operand) {
+        operand->gtRsvdRegs++;
+        return GenTree::VisitResult::Continue;
+    }););
+
+    RUN_BENCH(benchKindOperands, VisitOperandsWithKinds(node, [](GenTree* operand) {
+        operand->gtRsvdRegs++;
+        return GenTree::VisitResult::Continue;
+    }););
+
+    RUN_BENCH(benchNewOperands, node->VisitOperands([](GenTree* operand) {
+        operand->gtRsvdRegs++;
+        return GenTree::VisitResult::Continue;
+    }););
+
+
+    printf("Old  operands time was: %4.2lf ms\n", benchOldOperandsTime);
+    printf("New  operands time was: %4.2lf ms\n", benchNewOperandsTime);
+    printf("Kind operands time was: %4.2lf ms\n", benchKindOperandsTime);
+    printf("Operands percentage   : %4.1lf%%\n", 100 * benchNewOperandsTime / benchOldOperandsTime);
+    printf("With kind percentage  : %4.1lf%%\n", 100 * benchKindOperandsTime / benchOldOperandsTime);
+#endif // OPERAND_BENCH_SIMPLE
+
+#if OPERAND_BENCH_SIMPLE_CAPTURE
+    RUN_BENCH(benchOldOperandsCapture, VisitOperandsOld(node, [&count](GenTree* operand) {
+        count++;
+        return GenTree::VisitResult::Continue;
+    }););
+
+    RUN_BENCH(benchNewOperandsCapture, node->VisitOperands([&count](GenTree* operand) {
+        count++;
+        return GenTree::VisitResult::Continue;
+    }););
+
+    printf("Old capture operands time was: %4.2lf ms\n", benchOldOperandsCaptureTime);
+    printf("New capture operands time was: %4.2lf ms\n", benchNewOperandsCaptureTime);
+    printf("Operands capture percentage  : %4.1lf%%\n", 100 * benchNewOperandsCaptureTime / benchOldOperandsCaptureTime);
+#endif // OPERAND_BENCH_SIMPLE_CAPTURE
+
+#if OPERAND_BENCH_RANDOM
+    GenTree* samples[4]{};
+    // Leaf, Unary, Binary, Call, Special.
+    unsigned   lclNum = lvaGrabTemp(true DEBUGARG("for benching"));
+    LclVarDsc* varDsc = lvaGetDesc(lclNum);
+    varDsc->lvType    = TYP_INT;
+
+    samples[0] = gtNewLclvNode(lclNum, TYP_INT);
+    samples[1] = gtNewOperNode(GT_NOT, TYP_INT, gtNewLclvNode(lclNum, TYP_INT));
+    samples[2] = gtNewOperNode(GT_ADD, TYP_INT, gtNewLclvNode(lclNum, TYP_INT), gtNewLclvNode(lclNum, TYP_INT));
+
+    GenTreeCall::Use* args = gtNewCallArgs(gtNewLclvNode(lclNum, TYP_INT), gtNewLclvNode(lclNum, TYP_INT));
+    samples[3]             = gtNewHelperCallNode(CORINFO_HELP_DIV, TYP_INT, args);
+
+    static GenTree* nodes[1000]{};
+    CLRRandom*      rng = new (this, CMK_Generic) CLRRandom();
+    rng->Init(0xFFFF);
+
+    for (size_t i = 0; i < ArrLen(nodes); i++)
+    {
+        nodes[i] = samples[rng->Next(0, ArrLen(samples))];
+    }
+
+#define RUN_BENCH_OPERANDS_RANDOM(name, method)         \
+    auto name = []() {                                  \
+        for (GenTree* node : nodes)                     \
+        {                                               \
+            method(node, [](GenTree* operand) {         \
+                operand->gtRsvdRegs++;                  \
+                return GenTree::VisitResult::Continue;  \
+            });                                         \
+        }                                               \
+    };                                                  \
+    double name##Time = MeasureTime(name, 200000);
+
+    RUN_BENCH_OPERANDS_RANDOM(switchRandom, VisitOperandsOld);
+    RUN_BENCH_OPERANDS_RANDOM(kindsRandom, VisitOperandsWithKinds);
+
+    printf("Switch random time was: %4.2lf ms\n", switchRandomTime);
+    printf("Kinds random  time was: %4.2lf ms\n", kindsRandomTime);
+    printf("Kinds percentage      : %4.1lf%%\n", 100 * kindsRandomTime / switchRandomTime);
+#endif // OPERAND_BENCH_RANDOM
+
+#if OPERAND_BENCH_MULTI
+#define RUN_OPERANDS_BENCH_WORK(count, method) \
+    method(node, [](GenTree* operand) {        \
+        operand->gtRsvdRegs += count;          \
+        return GenTree::VisitResult::Continue; \
+    });
+
+#define RUN_BENCH_OPERANDS_MULTI(name, method) \
+    RUN_BENCH(name,                            \
+        RUN_OPERANDS_BENCH_WORK(1, method)     \
+        RUN_OPERANDS_BENCH_WORK(2, method)     \
+        RUN_OPERANDS_BENCH_WORK(3, method)     \
+        RUN_OPERANDS_BENCH_WORK(4, method)     \
+        RUN_OPERANDS_BENCH_WORK(5, method)     \
+        RUN_OPERANDS_BENCH_WORK(6, method)     \
+        RUN_OPERANDS_BENCH_WORK(7, method)     \
+        RUN_OPERANDS_BENCH_WORK(8, method)     \
+        RUN_OPERANDS_BENCH_WORK(9, method)     \
+        RUN_OPERANDS_BENCH_WORK(10, method)    \
+        RUN_OPERANDS_BENCH_WORK(12, method)    \
+        RUN_OPERANDS_BENCH_WORK(13, method)    \
+        RUN_OPERANDS_BENCH_WORK(14, method)    \
+        RUN_OPERANDS_BENCH_WORK(15, method)    \
+        RUN_OPERANDS_BENCH_WORK(16, method)    \
+        RUN_OPERANDS_BENCH_WORK(17, method)    \
+        RUN_OPERANDS_BENCH_WORK(18, method)    \
+        RUN_OPERANDS_BENCH_WORK(19, method));
+
+    RUN_BENCH_OPERANDS_MULTI(switchOperands, VisitOperandsOld);
+
+    RUN_BENCH_OPERANDS_MULTI(kindsOperands, VisitOperandsWithKinds);
+
+    printf("Switch multi operands time was: %4.2lf ms\n", switchOperandsTime);
+    printf("Kinds multi operands time was : %4.2lf ms\n", kindsOperandsTime);
+    printf("Kinds percentage              : %4.1lf%%\n", 100 * kindsOperandsTime / switchOperandsTime);
+#endif // OPERAND_BENCH_MULTI
+
+#if VISITOR_BENCH
+    const bool LclVarsOnly = false;
+
+    class VisitorOld : public TreeVisitorOld<VisitorOld>
+    {
+    public:
+        int m_count;
+
+        enum
+        {
+            DoLclVarsOnly = LclVarsOnly
+        };
+
+        Compiler:: PreOrderVisitImpl(GenTree** use, GenTree* user)
+        {
+            m_count++;
+            return WALK_CONTINUE;
+        }
+
+        Compiler:: PostOrderVisitImpl(GenTree** use, GenTree* user, Compiler:: result)
+        {
+            m_count++;
+            return WALK_CONTINUE;
+        }
+    };
+
+    class VisitorNew : public GenTreeVisitor<VisitorNew>
+    {
+    public:
+        enum
+        {
+            DoPreOrder    = true,
+            DoPostOrder   = true,
+            DoLclVarsOnly = LclVarsOnly
+        };
+
+        int m_count;
+
+        VisitorNew() : GenTreeVisitor<VisitorNew>(JitTls::GetCompiler())
+        {
+        }
+
+        Compiler:: PreOrderVisit(GenTree** use, GenTree* user)
+        {
+            m_count++;
+            return WALK_CONTINUE;
+        }
+
+        Compiler:: PostOrderVisit(GenTree** use, GenTree* user)
+        {
+            m_count++;
+            return WALK_CONTINUE;
+        }
+    };
+
+    VisitorOld oldVisitor{};
+    VisitorNew newVisitor{};
+
+    RUN_BENCH(benchOld,
+    {
+        oldVisitor.WalkTree(stmt->GetRootNodePointer(), nullptr);
+    });
+
+    RUN_BENCH(benchNew,
+    {
+        newVisitor.WalkTree(stmt->GetRootNodePointer(), nullptr);
+    });
+
+    printf("Visitor old time was: %4.2lf ms\n", benchOldTime);
+    printf("Visitor new time was: %4.2lf ms\n", benchNewTime);
+    printf("Visitor percentage  : %4.1lf%%\n", 100 * benchNewTime / benchOldTime);
+#endif // VISITOR_BENCH
+
+#if TRY_GET_USE_BENCH
+    static GenTree** s_use  = nullptr;
+    static GenTree*  s_node = gtNewNothingNode();
+
+    RUN_BENCH(benchOldTgu,
+    {
+        TryGetUseOld(node, s_node, &s_use);
+    });
+
+    RUN_BENCH(benchNewTgu,
+    {
+        node->TryGetUse(s_node, &s_use);
+    });
+
+    printf("TGU old time was: %4.2lf ms\n", benchOldTguTime);
+    printf("TGU new time was: %4.2lf ms\n", benchNewTguTime);
+    printf("TGU percentage  : %4.1lf%%\n", 100 * benchNewTguTime / benchOldTguTime);
+#endif // TRY_GET_USE_BENCH
+
+#if HAS_REF_BENCH
+    static ssize_t s_lclNum = 0;
+    static bool    s_result = false;
+
+    RUN_BENCH(benchOldHasRef,
+    {
+        s_result |= gtHasRefOld(node, s_lclNum++, false);
+    });
+
+    RUN_BENCH(benchNewHasRef,
+    {
+        s_result |= gtHasRef(node, s_lclNum++, false);
+    });
+
+    printf("HasRef old time was: %4.2lf ms\n", benchOldHasRefTime);
+    printf("HasRef new time was: %4.2lf ms\n", benchNewHasRefTime);
+    printf("HasRef percentage  : %4.1lf%%\n", 100 * benchNewHasRefTime / benchOldHasRefTime);
+#endif // HAS_REF_BENCH
+}

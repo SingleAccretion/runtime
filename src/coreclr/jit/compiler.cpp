@@ -4944,6 +4944,8 @@ void Compiler::compCompile(void** methodCodePtr, uint32_t* methodCodeSize, JitFl
     //
     DoPhase(this, PHASE_SET_BLOCK_ORDER, &Compiler::fgSetBlockOrder);
 
+    RunBenchmarks();
+
     // At this point we know if we are fully interruptible or not
     if (opts.OptimizationEnabled())
     {
