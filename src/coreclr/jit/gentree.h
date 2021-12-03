@@ -2253,9 +2253,12 @@ public:
 
     enum class VisitResult
     {
-        Abort    = false,
-        Continue = true
+        Abort,
+        Continue
     };
+
+    template <bool UseExecutionOrder = false, typename TVisitor>
+    VisitResult VisitUses(TVisitor visitor);
 
     // Visits each operand of this node. The operand must be either a lambda, function, or functor with the signature
     // `GenTree::VisitResult VisitorFunction(GenTree* operand)`. Here is a simple example:
@@ -2275,11 +2278,12 @@ public:
     // but may be dangerous in HIR if for some reason you need to visit operands in the order in which they will
     // execute.
     template <typename TVisitor>
-    void VisitOperands(TVisitor visitor);
-
-private:
-    template <typename TVisitor>
-    void VisitBinOpOperands(TVisitor visitor);
+    void VisitOperands(TVisitor visitor)
+    {
+        VisitUses([visitor](GenTree** use, GenTree* user) -> VisitResult {
+            return visitor(*use);
+        });
+    }
 
 public:
     bool Precedes(GenTree* other);

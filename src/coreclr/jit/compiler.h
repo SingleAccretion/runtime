@@ -3642,9 +3642,9 @@ public:
 
     enum fgWalkResult
     {
+        WALK_ABORT,
         WALK_CONTINUE,
-        WALK_SKIP_SUBTREES,
-        WALK_ABORT
+        WALK_SKIP_SUBTREES
     };
     struct fgWalkData;
     typedef fgWalkResult(fgWalkPreFn)(GenTree** pTree, fgWalkData* data);
@@ -11196,421 +11196,62 @@ public:
     {
         assert(use != nullptr);
 
-        GenTree* node = *use;
+        fgWalkResult result = fgWalkResult::WALK_CONTINUE;
+        GenTree*     node   = *use;
 
         if (TVisitor::ComputeStack)
         {
             m_ancestors.Push(node);
         }
 
-        fgWalkResult result = fgWalkResult::WALK_CONTINUE;
-        if (TVisitor::DoPreOrder && !TVisitor::DoLclVarsOnly)
+        if (TVisitor::DoPreOrder)
         {
+            if (TVisitor::DoLclVarsOnly)
+            {
+                switch (node->OperGet())
+                {
+                    case GT_LCL_VAR:
+                    case GT_LCL_FLD:
+                    case GT_LCL_VAR_ADDR:
+                    case GT_LCL_FLD_ADDR:
+                    case GT_STORE_LCL_VAR:
+                    case GT_STORE_LCL_FLD:
+                        break;
+
+                    default:
+                        return result;
+                }
+            }
+
             result = reinterpret_cast<TVisitor*>(this)->PreOrderVisit(use, user);
+
+            node = *use;
+
             if (result == fgWalkResult::WALK_ABORT)
             {
                 return result;
             }
 
-            node = *use;
             if ((node == nullptr) || (result == fgWalkResult::WALK_SKIP_SUBTREES))
             {
                 goto DONE;
             }
         }
 
-        switch (node->OperGet())
+        static_assert_no_msg(sizeof(GenTree::VisitResult) == sizeof(int));
+        static_assert_no_msg(sizeof(fgWalkResult) == sizeof(int));
+        static_assert_no_msg(static_cast<int>(GenTree::VisitResult::Continue) == fgWalkResult::WALK_CONTINUE);
+        static_assert_no_msg(static_cast<int>(GenTree::VisitResult::Abort) == fgWalkResult::WALK_ABORT);
+
+        GenTree::VisitResult walkResult = node->VisitUses<UseExecutionOrder>([this](GenTree** use, GenTree* user) {
+            return static_cast<GenTree::VisitResult>(WalkTree(use, user));
+        });
+
+        result = static_cast<fgWalkResult>(walkResult);
+
+        if (result == fgWalkResult::WALK_ABORT)
         {
-            // Leaf lclVars
-            case GT_LCL_VAR:
-            case GT_LCL_FLD:
-            case GT_LCL_VAR_ADDR:
-            case GT_LCL_FLD_ADDR:
-                if (TVisitor::DoLclVarsOnly)
-                {
-                    result = reinterpret_cast<TVisitor*>(this)->PreOrderVisit(use, user);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-                FALLTHROUGH;
-
-            // Leaf nodes
-            case GT_CATCH_ARG:
-            case GT_LABEL:
-            case GT_FTN_ADDR:
-            case GT_RET_EXPR:
-            case GT_CNS_INT:
-            case GT_CNS_LNG:
-            case GT_CNS_DBL:
-            case GT_CNS_STR:
-            case GT_MEMORYBARRIER:
-            case GT_JMP:
-            case GT_JCC:
-            case GT_SETCC:
-            case GT_NO_OP:
-            case GT_START_NONGC:
-            case GT_START_PREEMPTGC:
-            case GT_PROF_HOOK:
-#if !defined(FEATURE_EH_FUNCLETS)
-            case GT_END_LFIN:
-#endif // !FEATURE_EH_FUNCLETS
-            case GT_PHI_ARG:
-            case GT_JMPTABLE:
-            case GT_CLS_VAR:
-            case GT_CLS_VAR_ADDR:
-            case GT_ARGPLACE:
-            case GT_PHYSREG:
-            case GT_EMITNOP:
-            case GT_PINVOKE_PROLOG:
-            case GT_PINVOKE_EPILOG:
-            case GT_IL_OFFSET:
-                break;
-
-            // Lclvar unary operators
-            case GT_STORE_LCL_VAR:
-            case GT_STORE_LCL_FLD:
-                if (TVisitor::DoLclVarsOnly)
-                {
-                    result = reinterpret_cast<TVisitor*>(this)->PreOrderVisit(use, user);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-                FALLTHROUGH;
-
-            // Standard unary operators
-            case GT_NOT:
-            case GT_NEG:
-            case GT_BSWAP:
-            case GT_BSWAP16:
-            case GT_COPY:
-            case GT_RELOAD:
-            case GT_ARR_LENGTH:
-            case GT_CAST:
-            case GT_BITCAST:
-            case GT_CKFINITE:
-            case GT_LCLHEAP:
-            case GT_ADDR:
-            case GT_IND:
-            case GT_OBJ:
-            case GT_BLK:
-            case GT_BOX:
-            case GT_ALLOCOBJ:
-            case GT_INIT_VAL:
-            case GT_JTRUE:
-            case GT_SWITCH:
-            case GT_NULLCHECK:
-            case GT_PUTARG_REG:
-            case GT_PUTARG_STK:
-            case GT_PUTARG_TYPE:
-            case GT_RETURNTRAP:
-            case GT_NOP:
-            case GT_FIELD:
-            case GT_RETURN:
-            case GT_RETFILT:
-            case GT_RUNTIMELOOKUP:
-            case GT_KEEPALIVE:
-            case GT_INC_SATURATE:
-            {
-                GenTreeUnOp* const unOp = node->AsUnOp();
-                if (unOp->gtOp1 != nullptr)
-                {
-                    result = WalkTree(&unOp->gtOp1, unOp);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-                break;
-            }
-
-            // Special nodes
-            case GT_PHI:
-                for (GenTreePhi::Use& use : node->AsPhi()->Uses())
-                {
-                    result = WalkTree(&use.NodeRef(), node);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-                break;
-
-            case GT_FIELD_LIST:
-                for (GenTreeFieldList::Use& use : node->AsFieldList()->Uses())
-                {
-                    result = WalkTree(&use.NodeRef(), node);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-                break;
-
-            case GT_CMPXCHG:
-            {
-                GenTreeCmpXchg* const cmpXchg = node->AsCmpXchg();
-
-                result = WalkTree(&cmpXchg->gtOpLocation, cmpXchg);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                result = WalkTree(&cmpXchg->gtOpValue, cmpXchg);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                result = WalkTree(&cmpXchg->gtOpComparand, cmpXchg);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                break;
-            }
-
-            case GT_ARR_ELEM:
-            {
-                GenTreeArrElem* const arrElem = node->AsArrElem();
-
-                result = WalkTree(&arrElem->gtArrObj, arrElem);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-
-                const unsigned rank = arrElem->gtArrRank;
-                for (unsigned dim = 0; dim < rank; dim++)
-                {
-                    result = WalkTree(&arrElem->gtArrInds[dim], arrElem);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-                break;
-            }
-
-            case GT_ARR_OFFSET:
-            {
-                GenTreeArrOffs* const arrOffs = node->AsArrOffs();
-
-                result = WalkTree(&arrOffs->gtOffset, arrOffs);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                result = WalkTree(&arrOffs->gtIndex, arrOffs);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                result = WalkTree(&arrOffs->gtArrObj, arrOffs);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                break;
-            }
-
-            case GT_DYN_BLK:
-            {
-                GenTreeDynBlk* const dynBlock = node->AsDynBlk();
-
-                GenTree** op1Use = &dynBlock->gtOp1;
-                GenTree** op2Use = &dynBlock->gtDynamicSize;
-
-                if (TVisitor::UseExecutionOrder && dynBlock->gtEvalSizeFirst)
-                {
-                    std::swap(op1Use, op2Use);
-                }
-
-                result = WalkTree(op1Use, dynBlock);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                result = WalkTree(op2Use, dynBlock);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                break;
-            }
-
-            case GT_STORE_DYN_BLK:
-            {
-                GenTreeDynBlk* const dynBlock = node->AsDynBlk();
-
-                GenTree** op1Use = &dynBlock->gtOp1;
-                GenTree** op2Use = &dynBlock->gtOp2;
-                GenTree** op3Use = &dynBlock->gtDynamicSize;
-
-                if (TVisitor::UseExecutionOrder)
-                {
-                    if (dynBlock->IsReverseOp())
-                    {
-                        std::swap(op1Use, op2Use);
-                    }
-                    if (dynBlock->gtEvalSizeFirst)
-                    {
-                        std::swap(op3Use, op2Use);
-                        std::swap(op2Use, op1Use);
-                    }
-                }
-
-                result = WalkTree(op1Use, dynBlock);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                result = WalkTree(op2Use, dynBlock);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                result = WalkTree(op3Use, dynBlock);
-                if (result == fgWalkResult::WALK_ABORT)
-                {
-                    return result;
-                }
-                break;
-            }
-
-            case GT_CALL:
-            {
-                GenTreeCall* const call = node->AsCall();
-
-                if (call->gtCallThisArg != nullptr)
-                {
-                    result = WalkTree(&call->gtCallThisArg->NodeRef(), call);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-
-                for (GenTreeCall::Use& use : call->Args())
-                {
-                    result = WalkTree(&use.NodeRef(), call);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-
-                for (GenTreeCall::Use& use : call->LateArgs())
-                {
-                    result = WalkTree(&use.NodeRef(), call);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-
-                if (call->gtCallType == CT_INDIRECT)
-                {
-                    if (call->gtCallCookie != nullptr)
-                    {
-                        result = WalkTree(&call->gtCallCookie, call);
-                        if (result == fgWalkResult::WALK_ABORT)
-                        {
-                            return result;
-                        }
-                    }
-
-                    result = WalkTree(&call->gtCallAddr, call);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-
-                if (call->gtControlExpr != nullptr)
-                {
-                    result = WalkTree(&call->gtControlExpr, call);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-
-                break;
-            }
-
-#if defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
-#if defined(FEATURE_SIMD)
-            case GT_SIMD:
-#endif
-#if defined(FEATURE_HW_INTRINSICS)
-            case GT_HWINTRINSIC:
-#endif
-                if (TVisitor::UseExecutionOrder && node->IsReverseOp())
-                {
-                    assert(node->AsMultiOp()->GetOperandCount() == 2);
-
-                    result = WalkTree(&node->AsMultiOp()->Op(2), node);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                    result = WalkTree(&node->AsMultiOp()->Op(1), node);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-                else
-                {
-                    for (GenTree** use : node->AsMultiOp()->UseEdges())
-                    {
-                        result = WalkTree(use, node);
-                        if (result == fgWalkResult::WALK_ABORT)
-                        {
-                            return result;
-                        }
-                    }
-                }
-                break;
-#endif // defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
-
-            // Binary nodes
-            default:
-            {
-                assert(node->OperIsBinary());
-
-                GenTreeOp* const op = node->AsOp();
-
-                GenTree** op1Use = &op->gtOp1;
-                GenTree** op2Use = &op->gtOp2;
-
-                if (TVisitor::UseExecutionOrder && node->IsReverseOp())
-                {
-                    std::swap(op1Use, op2Use);
-                }
-
-                if (*op1Use != nullptr)
-                {
-                    result = WalkTree(op1Use, op);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-
-                if (*op2Use != nullptr)
-                {
-                    result = WalkTree(op2Use, op);
-                    if (result == fgWalkResult::WALK_ABORT)
-                    {
-                        return result;
-                    }
-                }
-                break;
-            }
+            return result;
         }
 
     DONE:

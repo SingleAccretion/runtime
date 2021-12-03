@@ -4161,9 +4161,11 @@ inline bool Compiler::PreciseRefCountsRequired()
     return opts.OptimizationEnabled();
 }
 
-template <typename TVisitor>
-void GenTree::VisitOperands(TVisitor visitor)
+template <bool UseExecutionOrder, typename TVisitor>
+FORCEINLINE GenTree::VisitResult GenTree::VisitUses(TVisitor visitor)
 {
+    VisitResult result = VisitResult::Continue;
+
     switch (OperGet())
     {
         // Leaf nodes
@@ -4200,16 +4202,16 @@ void GenTree::VisitOperands(TVisitor visitor)
         case GT_PINVOKE_PROLOG:
         case GT_PINVOKE_EPILOG:
         case GT_IL_OFFSET:
-            return;
+            break;
 
         // Unary operators with an optional operand
         case GT_NOP:
         case GT_FIELD:
         case GT_RETURN:
         case GT_RETFILT:
-            if (this->AsUnOp()->gtOp1 == nullptr)
+            if (AsUnOp()->gtOp1 == nullptr)
             {
-                return;
+                break;
             }
             FALLTHROUGH;
 
@@ -4247,10 +4249,204 @@ void GenTree::VisitOperands(TVisitor visitor)
         case GT_RETURNTRAP:
         case GT_KEEPALIVE:
         case GT_INC_SATURATE:
-            visitor(this->AsUnOp()->gtOp1);
-            return;
+        {
+            result = visitor(&AsUnOp()->gtOp1, this);
+            break;
+        }
 
-// Variadic nodes
+        // Special nodes
+        case GT_PHI:
+            for (GenTreePhi::Use& use : AsPhi()->Uses())
+            {
+                result = visitor(&use.NodeRef(), this);
+                if (result == VisitResult::Abort)
+                {
+                    return result;
+                }
+            }
+            break;
+
+        case GT_FIELD_LIST:
+            for (GenTreeFieldList::Use& use : AsFieldList()->Uses())
+            {
+                result = visitor(&use.NodeRef(), this);
+                if (result == VisitResult::Abort)
+                {
+                    return result;
+                }
+            }
+            break;
+
+        case GT_CMPXCHG:
+        {
+            GenTreeCmpXchg* const cmpXchg = AsCmpXchg();
+
+            result = visitor(&cmpXchg->gtOpLocation, cmpXchg);
+            if (result == VisitResult::Abort)
+            {
+                return result;
+            }
+            result = visitor(&cmpXchg->gtOpValue, cmpXchg);
+            if (result == VisitResult::Abort)
+            {
+                return result;
+            }
+            result = visitor(&cmpXchg->gtOpComparand, cmpXchg);
+            break;
+        }
+
+        case GT_ARR_ELEM:
+        {
+            GenTreeArrElem* const arrElem = AsArrElem();
+
+            result = visitor(&arrElem->gtArrObj, arrElem);
+            if (result == VisitResult::Abort)
+            {
+                return result;
+            }
+
+            const unsigned rank = arrElem->gtArrRank;
+            for (unsigned dim = 0; dim < rank; dim++)
+            {
+                result = visitor(&arrElem->gtArrInds[dim], arrElem);
+                if (result == VisitResult::Abort)
+                {
+                    return result;
+                }
+            }
+            break;
+        }
+
+        case GT_ARR_OFFSET:
+        {
+            GenTreeArrOffs* const arrOffs = AsArrOffs();
+
+            result = visitor(&arrOffs->gtOffset, arrOffs);
+            if (result == VisitResult::Abort)
+            {
+                return result;
+            }
+            result = visitor(&arrOffs->gtIndex, arrOffs);
+            if (result == VisitResult::Abort)
+            {
+                return result;
+            }
+            result = visitor(&arrOffs->gtArrObj, arrOffs);
+            break;
+        }
+
+        case GT_DYN_BLK:
+        {
+            GenTreeDynBlk* const dynBlock = AsDynBlk();
+
+            GenTree** op1Use = &dynBlock->gtOp1;
+            GenTree** op2Use = &dynBlock->gtDynamicSize;
+
+            if (UseExecutionOrder && dynBlock->gtEvalSizeFirst)
+            {
+                std::swap(op1Use, op2Use);
+            }
+
+            result = visitor(op1Use, dynBlock);
+            if (result == VisitResult::Abort)
+            {
+                return result;
+            }
+            result = visitor(op2Use, dynBlock);
+            break;
+        }
+
+        case GT_STORE_DYN_BLK:
+        {
+            GenTreeDynBlk* const dynBlock = AsDynBlk();
+
+            GenTree** op1Use = &dynBlock->gtOp1;
+            GenTree** op2Use = &dynBlock->gtOp2;
+            GenTree** op3Use = &dynBlock->gtDynamicSize;
+
+            if (UseExecutionOrder)
+            {
+                if (dynBlock->IsReverseOp())
+                {
+                    std::swap(op1Use, op2Use);
+                }
+                if (dynBlock->gtEvalSizeFirst)
+                {
+                    std::swap(op3Use, op2Use);
+                    std::swap(op2Use, op1Use);
+                }
+            }
+
+            result = visitor(op1Use, dynBlock);
+            if (result == VisitResult::Abort)
+            {
+                return result;
+            }
+            result = visitor(op2Use, dynBlock);
+            if (result == VisitResult::Abort)
+            {
+                return result;
+            }
+            result = visitor(op3Use, dynBlock);
+            break;
+        }
+
+        case GT_CALL:
+        {
+            GenTreeCall* const call = AsCall();
+
+            if (call->gtCallThisArg != nullptr)
+            {
+                result = visitor(&call->gtCallThisArg->NodeRef(), call);
+                if (result == VisitResult::Abort)
+                {
+                    return result;
+                }
+            }
+
+            for (GenTreeCall::Use& use : call->Args())
+            {
+                result = visitor(&use.NodeRef(), call);
+                if (result == VisitResult::Abort)
+                {
+                    return result;
+                }
+            }
+
+            for (GenTreeCall::Use& use : call->LateArgs())
+            {
+                result = visitor(&use.NodeRef(), call);
+                if (result == VisitResult::Abort)
+                {
+                    return result;
+                }
+            }
+
+            if (call->gtCallType == CT_INDIRECT)
+            {
+                if (call->gtCallCookie != nullptr)
+                {
+                    result = visitor(&call->gtCallCookie, call);
+                    if (result == VisitResult::Abort)
+                    {
+                        return result;
+                    }
+                }
+
+                result = visitor(&call->gtCallAddr, call);
+                if (result == VisitResult::Abort)
+                {
+                    return result;
+                }
+            }
+
+            if (call->gtControlExpr != nullptr)
+            {
+                result = visitor(&call->gtControlExpr, call);
+            }
+            break;
+        }
+
 #if defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
 #if defined(FEATURE_SIMD)
         case GT_SIMD:
@@ -4258,178 +4454,65 @@ void GenTree::VisitOperands(TVisitor visitor)
 #if defined(FEATURE_HW_INTRINSICS)
         case GT_HWINTRINSIC:
 #endif
-            for (GenTree* operand : this->AsMultiOp()->Operands())
+            if (UseExecutionOrder && IsReverseOp())
             {
-                if (visitor(operand) == VisitResult::Abort)
+                assert(AsMultiOp()->GetOperandCount() == 2);
+
+                result = visitor(&AsMultiOp()->Op(2), this);
+                if (result == VisitResult::Abort)
                 {
-                    break;
+                    return result;
+                }
+
+                result = visitor(&AsMultiOp()->Op(1), this);
+            }
+            else
+            {
+                for (GenTree** use : AsMultiOp()->UseEdges())
+                {
+                    result = visitor(use, this);
+                    if (result == VisitResult::Abort)
+                    {
+                        return result;
+                    }
                 }
             }
-            return;
+            break;
 #endif // defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
-
-        // Special nodes
-        case GT_PHI:
-            for (GenTreePhi::Use& use : AsPhi()->Uses())
-            {
-                if (visitor(use.GetNode()) == VisitResult::Abort)
-                {
-                    break;
-                }
-            }
-            return;
-
-        case GT_FIELD_LIST:
-            for (GenTreeFieldList::Use& field : AsFieldList()->Uses())
-            {
-                if (visitor(field.GetNode()) == VisitResult::Abort)
-                {
-                    break;
-                }
-            }
-            return;
-
-        case GT_CMPXCHG:
-        {
-            GenTreeCmpXchg* const cmpXchg = this->AsCmpXchg();
-            if (visitor(cmpXchg->gtOpLocation) == VisitResult::Abort)
-            {
-                return;
-            }
-            if (visitor(cmpXchg->gtOpValue) == VisitResult::Abort)
-            {
-                return;
-            }
-            visitor(cmpXchg->gtOpComparand);
-            return;
-        }
-
-        case GT_ARR_ELEM:
-        {
-            GenTreeArrElem* const arrElem = this->AsArrElem();
-            if (visitor(arrElem->gtArrObj) == VisitResult::Abort)
-            {
-                return;
-            }
-            for (unsigned i = 0; i < arrElem->gtArrRank; i++)
-            {
-                if (visitor(arrElem->gtArrInds[i]) == VisitResult::Abort)
-                {
-                    return;
-                }
-            }
-            return;
-        }
-
-        case GT_ARR_OFFSET:
-        {
-            GenTreeArrOffs* const arrOffs = this->AsArrOffs();
-            if (visitor(arrOffs->gtOffset) == VisitResult::Abort)
-            {
-                return;
-            }
-            if (visitor(arrOffs->gtIndex) == VisitResult::Abort)
-            {
-                return;
-            }
-            visitor(arrOffs->gtArrObj);
-            return;
-        }
-
-        case GT_DYN_BLK:
-        {
-            GenTreeDynBlk* const dynBlock = this->AsDynBlk();
-            if (visitor(dynBlock->gtOp1) == VisitResult::Abort)
-            {
-                return;
-            }
-            visitor(dynBlock->gtDynamicSize);
-            return;
-        }
-
-        case GT_STORE_DYN_BLK:
-        {
-            GenTreeDynBlk* const dynBlock = this->AsDynBlk();
-            if (visitor(dynBlock->gtOp1) == VisitResult::Abort)
-            {
-                return;
-            }
-            if (visitor(dynBlock->gtOp2) == VisitResult::Abort)
-            {
-                return;
-            }
-            visitor(dynBlock->gtDynamicSize);
-            return;
-        }
-
-        case GT_CALL:
-        {
-            GenTreeCall* const call = this->AsCall();
-            if ((call->gtCallThisArg != nullptr) && (visitor(call->gtCallThisArg->GetNode()) == VisitResult::Abort))
-            {
-                return;
-            }
-
-            for (GenTreeCall::Use& use : call->Args())
-            {
-                if (visitor(use.GetNode()) == VisitResult::Abort)
-                {
-                    return;
-                }
-            }
-
-            for (GenTreeCall::Use& use : call->LateArgs())
-            {
-                if (visitor(use.GetNode()) == VisitResult::Abort)
-                {
-                    return;
-                }
-            }
-
-            if (call->gtCallType == CT_INDIRECT)
-            {
-                if ((call->gtCallCookie != nullptr) && (visitor(call->gtCallCookie) == VisitResult::Abort))
-                {
-                    return;
-                }
-                if ((call->gtCallAddr != nullptr) && (visitor(call->gtCallAddr) == VisitResult::Abort))
-                {
-                    return;
-                }
-            }
-            if ((call->gtControlExpr != nullptr))
-            {
-                visitor(call->gtControlExpr);
-            }
-            return;
-        }
 
         // Binary nodes
         default:
-            assert(this->OperIsBinary());
-            VisitBinOpOperands<TVisitor>(visitor);
-            return;
+        {
+            assert(OperIsBinary());
+
+            GenTreeOp* const op = AsOp();
+
+            GenTree** op1Use = &op->gtOp1;
+            GenTree** op2Use = &op->gtOp2;
+
+            if (UseExecutionOrder && IsReverseOp())
+            {
+                std::swap(op1Use, op2Use);
+            }
+
+            if (*op1Use != nullptr)
+            {
+                result = visitor(op1Use, op);
+                if (result == VisitResult::Abort)
+                {
+                    return result;
+                }
+            }
+
+            if (*op2Use != nullptr)
+            {
+                result = visitor(op2Use, op);
+            }
+            break;
+        }
     }
-}
 
-template <typename TVisitor>
-void GenTree::VisitBinOpOperands(TVisitor visitor)
-{
-    assert(this->OperIsBinary());
-
-    GenTreeOp* const op = this->AsOp();
-
-    GenTree* const op1 = op->gtOp1;
-    if ((op1 != nullptr) && (visitor(op1) == VisitResult::Abort))
-    {
-        return;
-    }
-
-    GenTree* const op2 = op->gtOp2;
-    if (op2 != nullptr)
-    {
-        visitor(op2);
-    }
+    return result;
 }
 
 /*****************************************************************************
