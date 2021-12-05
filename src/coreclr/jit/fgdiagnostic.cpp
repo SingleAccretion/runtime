@@ -4255,7 +4255,7 @@ public:
 
         GenTree* node = *use;
 
-        Compiler:: result = WALK_CONTINUE;
+        Compiler::fgWalkResult result = Compiler::WALK_CONTINUE;
         if (!TVisitor::DoLclVarsOnly)
         {
             result = VisitorPreOrder(use, user);
@@ -4265,7 +4265,7 @@ public:
             }
 
             node = *use;
-            if ((node == nullptr) || (result == WALK_SKIP_SUBTREES))
+            if ((node == nullptr) || (result == Compiler::WALK_SKIP_SUBTREES))
             {
                 goto DONE;
             }
@@ -5236,6 +5236,310 @@ AGAIN:
     return false;
 }
 
+GenTree* fgTreeSeqLstOld;
+unsigned fgTreeSeqNumOld;
+GenTree* fgTreeSeqBegOld;
+
+void fgSetTreeSeqHelperOld(GenTree* tree, bool isLIR);
+void fgSetTreeSeqFinishOld(GenTree* tree, bool isLIR);
+
+GenTree* fgSetTreeSeqOld(GenTree* tree, GenTree* prevTree, bool isLIR)
+{
+    GenTree list;
+
+    if (prevTree == nullptr)
+    {
+        prevTree = &list;
+    }
+    fgTreeSeqLstOld = prevTree;
+    fgTreeSeqNumOld = 0;
+    fgTreeSeqBegOld = nullptr;
+    fgSetTreeSeqHelperOld(tree, isLIR);
+
+    GenTree* result = prevTree->gtNext;
+    if (prevTree == &list)
+    {
+        list.gtNext->gtPrev = nullptr;
+    }
+
+    return result;
+}
+
+void fgSetTreeSeqHelperOld(GenTree* tree, bool isLIR)
+{
+    // TODO-List-Cleanup: measure what using GenTreeVisitor here brings.
+    genTreeOps oper;
+    unsigned   kind;
+
+    noway_assert(tree);
+    assert(!IsUninitialized(tree));
+
+    /* Figure out what kind of a node we have */
+
+    oper = tree->OperGet();
+    kind = tree->OperKind();
+
+    /* Is this a leaf/constant node? */
+
+    if (kind & (GTK_CONST | GTK_LEAF))
+    {
+        fgSetTreeSeqFinishOld(tree, isLIR);
+        return;
+    }
+
+    // Special handling for dynamic block ops.
+    if (tree->OperIs(GT_DYN_BLK, GT_STORE_DYN_BLK))
+    {
+        GenTreeDynBlk* dynBlk    = tree->AsDynBlk();
+        GenTree*       sizeNode  = dynBlk->gtDynamicSize;
+        GenTree*       dstAddr   = dynBlk->Addr();
+        GenTree*       src       = dynBlk->Data();
+        bool           isReverse = ((dynBlk->gtFlags & GTF_REVERSE_OPS) != 0);
+        if (dynBlk->gtEvalSizeFirst)
+        {
+            fgSetTreeSeqHelperOld(sizeNode, isLIR);
+        }
+
+        // We either have a DYN_BLK or a STORE_DYN_BLK. If the latter, we have a
+        // src (the Data to be stored), and isReverse tells us whether to evaluate
+        // that before dstAddr.
+        if (isReverse && (src != nullptr))
+        {
+            fgSetTreeSeqHelperOld(src, isLIR);
+        }
+        fgSetTreeSeqHelperOld(dstAddr, isLIR);
+        if (!isReverse && (src != nullptr))
+        {
+            fgSetTreeSeqHelperOld(src, isLIR);
+        }
+        if (!dynBlk->gtEvalSizeFirst)
+        {
+            fgSetTreeSeqHelperOld(sizeNode, isLIR);
+        }
+        fgSetTreeSeqFinishOld(dynBlk, isLIR);
+        return;
+    }
+
+    /* Is it a 'simple' unary/binary operator? */
+
+    if (kind & GTK_SMPOP)
+    {
+        GenTree* op1 = tree->AsOp()->gtOp1;
+        GenTree* op2 = tree->gtGetOp2IfPresent();
+
+        /* Special handling for AddrMode */
+        if (tree->OperIsAddrMode())
+        {
+            bool reverse = ((tree->gtFlags & GTF_REVERSE_OPS) != 0);
+            if (reverse)
+            {
+                assert(op1 != nullptr && op2 != nullptr);
+                fgSetTreeSeqHelperOld(op2, isLIR);
+            }
+            if (op1 != nullptr)
+            {
+                fgSetTreeSeqHelperOld(op1, isLIR);
+            }
+            if (!reverse && op2 != nullptr)
+            {
+                fgSetTreeSeqHelperOld(op2, isLIR);
+            }
+
+            fgSetTreeSeqFinishOld(tree, isLIR);
+            return;
+        }
+
+        /* Check for a nilary operator */
+
+        if (op1 == nullptr)
+        {
+            noway_assert(op2 == nullptr);
+            fgSetTreeSeqFinishOld(tree, isLIR);
+            return;
+        }
+
+        /* Is this a unary operator? */
+
+        if (op2 == nullptr)
+        {
+            /* Visit the (only) operand and we're done */
+
+            fgSetTreeSeqHelperOld(op1, isLIR);
+            fgSetTreeSeqFinishOld(tree, isLIR);
+            return;
+        }
+
+        // By the time execution order is being set, all QMARKs must have been rationalized.
+        assert(compQmarkRationalized && (oper != GT_QMARK) && (oper != GT_COLON));
+
+        /* This is a binary operator */
+
+        if (tree->gtFlags & GTF_REVERSE_OPS)
+        {
+            fgSetTreeSeqHelperOld(op2, isLIR);
+            fgSetTreeSeqHelperOld(op1, isLIR);
+        }
+        else
+        {
+            fgSetTreeSeqHelperOld(op1, isLIR);
+            fgSetTreeSeqHelperOld(op2, isLIR);
+        }
+
+        fgSetTreeSeqFinishOld(tree, isLIR);
+        return;
+    }
+
+    /* See what kind of a special operator we have here */
+
+    switch (oper)
+    {
+    case GT_CALL:
+
+        /* We'll evaluate the 'this' argument value first */
+        if (tree->AsCall()->gtCallThisArg != nullptr)
+        {
+            fgSetTreeSeqHelperOld(tree->AsCall()->gtCallThisArg->GetNode(), isLIR);
+        }
+
+        for (GenTreeCall::Use& use : tree->AsCall()->Args())
+        {
+            fgSetTreeSeqHelperOld(use.GetNode(), isLIR);
+        }
+
+        for (GenTreeCall::Use& use : tree->AsCall()->LateArgs())
+        {
+            fgSetTreeSeqHelperOld(use.GetNode(), isLIR);
+        }
+
+        if ((tree->AsCall()->gtCallType == CT_INDIRECT) && (tree->AsCall()->gtCallCookie != nullptr))
+        {
+            fgSetTreeSeqHelperOld(tree->AsCall()->gtCallCookie, isLIR);
+        }
+
+        if (tree->AsCall()->gtCallType == CT_INDIRECT)
+        {
+            fgSetTreeSeqHelperOld(tree->AsCall()->gtCallAddr, isLIR);
+        }
+
+        if (tree->AsCall()->gtControlExpr)
+        {
+            fgSetTreeSeqHelperOld(tree->AsCall()->gtControlExpr, isLIR);
+        }
+
+        break;
+
+#if defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+#if defined(FEATURE_SIMD)
+    case GT_SIMD:
+#endif
+#if defined(FEATURE_HW_INTRINSICS)
+    case GT_HWINTRINSIC:
+#endif
+        if (tree->IsReverseOp())
+        {
+            assert(tree->AsMultiOp()->GetOperandCount() == 2);
+            fgSetTreeSeqHelperOld(tree->AsMultiOp()->Op(2), isLIR);
+            fgSetTreeSeqHelperOld(tree->AsMultiOp()->Op(1), isLIR);
+        }
+        else
+        {
+            for (GenTree* operand : tree->AsMultiOp()->Operands())
+            {
+                fgSetTreeSeqHelperOld(operand, isLIR);
+            }
+        }
+        break;
+#endif // defined(FEATURE_SIMD) || defined(FEATURE_HW_INTRINSICS)
+
+    case GT_ARR_ELEM:
+
+        fgSetTreeSeqHelperOld(tree->AsArrElem()->gtArrObj, isLIR);
+
+        unsigned dim;
+        for (dim = 0; dim < tree->AsArrElem()->gtArrRank; dim++)
+        {
+            fgSetTreeSeqHelperOld(tree->AsArrElem()->gtArrInds[dim], isLIR);
+        }
+
+        break;
+
+    case GT_ARR_OFFSET:
+        fgSetTreeSeqHelperOld(tree->AsArrOffs()->gtOffset, isLIR);
+        fgSetTreeSeqHelperOld(tree->AsArrOffs()->gtIndex, isLIR);
+        fgSetTreeSeqHelperOld(tree->AsArrOffs()->gtArrObj, isLIR);
+        break;
+
+    case GT_PHI:
+        for (GenTreePhi::Use& use : tree->AsPhi()->Uses())
+        {
+            fgSetTreeSeqHelperOld(use.GetNode(), isLIR);
+        }
+        break;
+
+    case GT_FIELD_LIST:
+        for (GenTreeFieldList::Use& use : tree->AsFieldList()->Uses())
+        {
+            fgSetTreeSeqHelperOld(use.GetNode(), isLIR);
+        }
+        break;
+
+    case GT_CMPXCHG:
+        // Evaluate the trees left to right
+        fgSetTreeSeqHelperOld(tree->AsCmpXchg()->gtOpLocation, isLIR);
+        fgSetTreeSeqHelperOld(tree->AsCmpXchg()->gtOpValue, isLIR);
+        fgSetTreeSeqHelperOld(tree->AsCmpXchg()->gtOpComparand, isLIR);
+        break;
+
+    case GT_STORE_DYN_BLK:
+    case GT_DYN_BLK:
+        noway_assert(!"DYN_BLK nodes should be sequenced as a special case");
+        break;
+
+    default:
+#ifdef DEBUG
+        gtDispTree(tree);
+        noway_assert(!"unexpected operator");
+#endif // DEBUG
+        break;
+    }
+
+    fgSetTreeSeqFinishOld(tree, isLIR);
+}
+
+void fgSetTreeSeqFinishOld(GenTree* tree, bool isLIR)
+{
+    // If we are sequencing for LIR:
+    // - Clear the reverse ops flag
+    // - If we are processing a node that does not appear in LIR, do not add it to the list.
+    if (isLIR)
+    {
+        tree->gtFlags &= ~GTF_REVERSE_OPS;
+
+        if (tree->OperIs(GT_ARGPLACE))
+        {
+            return;
+        }
+    }
+
+    /* Append to the node list */
+    ++fgTreeSeqNumOld;
+
+#ifdef DEBUG
+    tree->gtSeqNum = fgTreeSeqNumOld;
+#endif // DEBUG
+
+    fgTreeSeqLstOld->gtNext = tree;
+    tree->gtNext            = nullptr;
+    tree->gtPrev            = fgTreeSeqLstOld;
+    fgTreeSeqLstOld         = tree;
+
+    if (!fgTreeSeqBegOld)
+    {
+        fgTreeSeqBegOld = tree;
+        assert(tree->gtSeqNum == 1);
+    }
+}
+
 template <typename Func>
 double MeasureTime(Func func, size_t repeatCount)
 {
@@ -5257,7 +5561,7 @@ double MeasureTime(Func func, size_t repeatCount)
 //
 void Compiler::RunBenchmarks()
 {
-    const size_t RepeatCount = 20000;
+    const size_t RepeatCount = 500000;
 #ifdef DEBUG
     const bool RunBenchmarks = true;
 #else
@@ -5271,10 +5575,11 @@ void Compiler::RunBenchmarks()
 
 #define OPERAND_BENCH_SIMPLE 0
 #define OPERAND_BENCH_SIMPLE_CAPTURE 0
-#define OPERAND_BENCH_RANDOM 1
+#define OPERAND_BENCH_RANDOM 0
 #define OPERAND_BENCH_MULTI 0
 #define VISITOR_BENCH 0
 #define TRY_GET_USE_BENCH 0
+#define SET_TREE_SEQ_BENCH 1
 #define HAS_REF_BENCH 0
 
 #define RUN_BENCH(benchName, action) auto benchName = [&]() {       \
@@ -5362,7 +5667,7 @@ void Compiler::RunBenchmarks()
             });                                         \
         }                                               \
     };                                                  \
-    double name##Time = MeasureTime(name, 200000);
+    double name##Time = MeasureTime(name, 10000);
 
     RUN_BENCH_OPERANDS_RANDOM(switchRandom, VisitOperandsOld);
     RUN_BENCH_OPERANDS_RANDOM(kindsRandom, VisitOperandsWithKinds);
@@ -5422,16 +5727,16 @@ void Compiler::RunBenchmarks()
             DoLclVarsOnly = LclVarsOnly
         };
 
-        Compiler:: PreOrderVisitImpl(GenTree** use, GenTree* user)
+        Compiler::fgWalkResult PreOrderVisitImpl(GenTree** use, GenTree* user)
         {
             m_count++;
-            return WALK_CONTINUE;
+            return fgWalkResult::WALK_CONTINUE;
         }
 
-        Compiler:: PostOrderVisitImpl(GenTree** use, GenTree* user, Compiler:: result)
+        Compiler::fgWalkResult PostOrderVisitImpl(GenTree** use, GenTree* user, Compiler::fgWalkResult result)
         {
             m_count++;
-            return WALK_CONTINUE;
+            return fgWalkResult::WALK_CONTINUE;
         }
     };
 
@@ -5451,16 +5756,16 @@ void Compiler::RunBenchmarks()
         {
         }
 
-        Compiler:: PreOrderVisit(GenTree** use, GenTree* user)
+        Compiler::fgWalkResult PreOrderVisit(GenTree** use, GenTree* user)
         {
             m_count++;
-            return WALK_CONTINUE;
+            return fgWalkResult::WALK_CONTINUE;
         }
 
-        Compiler:: PostOrderVisit(GenTree** use, GenTree* user)
+        Compiler::fgWalkResult PostOrderVisit(GenTree** use, GenTree* user)
         {
             m_count++;
-            return WALK_CONTINUE;
+            return fgWalkResult::WALK_CONTINUE;
         }
     };
 
@@ -5500,6 +5805,25 @@ void Compiler::RunBenchmarks()
     printf("TGU new time was: %4.2lf ms\n", benchNewTguTime);
     printf("TGU percentage  : %4.1lf%%\n", 100 * benchNewTguTime / benchOldTguTime);
 #endif // TRY_GET_USE_BENCH
+
+#if SET_TREE_SEQ_BENCH
+    RUN_BENCH(benchOldSetTreeSeq,
+    {
+        fgSetTreeSeqOld(node, nullptr, false);
+    });
+
+    RUN_BENCH(benchNewSetTreeSeq,
+    {
+        fgSetTreeSeq(node);
+    });
+
+    fgStmtListThreaded = false;
+    fgSetBlockOrder();
+
+    printf("SetTreeSeq old time was: %4.2lf ms\n", benchOldSetTreeSeqTime);
+    printf("SetTreeSeq new time was: %4.2lf ms\n", benchNewSetTreeSeqTime);
+    printf("SetTreeSeq percentage  : %4.1lf%%\n", 100 * benchNewSetTreeSeqTime / benchOldSetTreeSeqTime);
+#endif // SET_TREE_SEQ_BENCH
 
 #if HAS_REF_BENCH
     static ssize_t s_lclNum = 0;

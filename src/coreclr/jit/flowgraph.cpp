@@ -3877,24 +3877,68 @@ BasicBlock* Compiler::fgRngChkTarget(BasicBlock* block, SpecialCodeKind kind)
 // Returns the first node (execution order) in the sequenced tree.
 GenTree* Compiler::fgSetTreeSeq(GenTree* tree, GenTree* prevTree, bool isLIR)
 {
-    GenTree list;
-
-    if (prevTree == nullptr)
+    class SetTreeSeqVisitor final : public GenTreeVisitor<SetTreeSeqVisitor>
     {
-        prevTree = &list;
-    }
-    fgTreeSeqLst = prevTree;
-    fgTreeSeqNum = 0;
-    fgTreeSeqBeg = nullptr;
-    fgSetTreeSeqHelper(tree, isLIR);
+        GenTree* m_prevNode;
+        bool     m_isLIR;
 
-    GenTree* result = prevTree->gtNext;
-    if (prevTree == &list)
-    {
-        list.gtNext->gtPrev = nullptr;
-    }
+    public:
+        enum
+        {
+            DoPostOrder       = true,
+            UseExecutionOrder = true
+        };
 
-    return result;
+        SetTreeSeqVisitor(Compiler* compiler)
+            : GenTreeVisitor<SetTreeSeqVisitor>(compiler)
+            , m_prevNode(nullptr)
+            , m_isLIR(false)
+        {
+        }
+
+        fgWalkResult PostOrderVisit(GenTree** use, GenTree* user)
+        {
+            GenTree* node = *use;
+
+            if (m_isLIR)
+            {
+                node->ClearReverseOp();
+
+                // ARGPLACE nodes are not threaded into the LIR sequence.
+                if (node->OperIs(GT_ARGPLACE))
+                {
+                    return fgWalkResult::WALK_CONTINUE;
+                }
+            }
+
+            node->gtPrev = m_prevNode;
+            if (m_prevNode != nullptr)
+            {
+                m_prevNode->gtNext = node;
+                INDEBUG(node->gtSeqNum = m_prevNode->gtSeqNum + 1);
+            }
+            m_prevNode = node;
+
+            return fgWalkResult::WALK_CONTINUE;
+        }
+
+        GenTree* Sequence(GenTree* tree, GenTree* prevNode, bool isLIR)
+        {
+            m_prevNode = prevNode;
+            m_isLIR    = isLIR;
+
+            WalkTree(&tree, nullptr);
+
+            assert(m_prevNode == tree);
+            tree->gtNext = nullptr;
+
+            return tree;
+        }
+    };
+
+    SetTreeSeqVisitor visitor(this);
+
+    return visitor.Sequence(tree, prevTree, isLIR);
 }
 
 /*****************************************************************************
