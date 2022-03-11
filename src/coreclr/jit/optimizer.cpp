@@ -5543,71 +5543,26 @@ bool Compiler::optNarrowTree(GenTree* tree, var_types srct, var_types dstt, Valu
 
 Compiler::fgWalkResult Compiler::optIsVarAssgCB(GenTree** pTree, fgWalkData* data)
 {
-    GenTree* tree = *pTree;
+    GenTree*             tree    = *pTree;
+    isVarAssgDsc*        desc    = static_cast<isVarAssgDsc*>(data->pCallbackData);
+    GenTreeLclVarCommon* lclNode = nullptr;
 
-    if (tree->OperIsSsaDef())
+    if (tree->OperIsSsaDef() && tree->DefinesLocal(data->compiler, &lclNode))
     {
-        isVarAssgDsc* desc = (isVarAssgDsc*)data->pCallbackData;
-        assert(desc && desc->ivaSelf == desc);
+        unsigned lclNum = lclNode->GetLclNum();
 
-        GenTree* dest = nullptr;
-        if (tree->OperIs(GT_CALL))
+        if (lclNum < lclMAX_ALLSET_TRACKED)
         {
-            desc->ivaMaskCall = optCallInterf(tree->AsCall());
-
-            dest = data->compiler->gtCallGetDefinedRetBufLclAddr(tree->AsCall());
-            if (dest == nullptr)
-            {
-                return WALK_CONTINUE;
-            }
-
-            dest = dest->AsOp()->gtOp1;
+            AllVarSetOps::AddElemD(data->compiler, desc->ivaMaskVal, lclNum);
         }
         else
         {
-            dest = tree->AsOp()->gtOp1;
+            desc->ivaMaskIncomplete = true;
         }
 
-        genTreeOps destOper = dest->OperGet();
-
-        if (destOper == GT_LCL_VAR)
+        if ((lclNum == desc->ivaVar) && (tree != desc->ivaSkip))
         {
-            unsigned tvar = dest->AsLclVarCommon()->GetLclNum();
-            if (tvar < lclMAX_ALLSET_TRACKED)
-            {
-                AllVarSetOps::AddElemD(data->compiler, desc->ivaMaskVal, tvar);
-            }
-            else
-            {
-                desc->ivaMaskIncomplete = true;
-            }
-
-            if (tvar == desc->ivaVar)
-            {
-                if (tree != desc->ivaSkip)
-                {
-                    return WALK_ABORT;
-                }
-            }
-        }
-        else if (destOper == GT_LCL_FLD)
-        {
-            /* We can't track every field of every var. Moreover, indirections
-               may access different parts of the var as different (but
-               overlapping) fields. So just treat them as indirect accesses */
-
-            // unsigned    lclNum = dest->AsLclFld()->GetLclNum();
-            // noway_assert(lvaTable[lclNum].lvAddrTaken);
-
-            varRefKinds refs = varTypeIsGC(tree->TypeGet()) ? VR_IND_REF : VR_IND_SCL;
-            desc->ivaMaskInd = varRefKinds(desc->ivaMaskInd | refs);
-        }
-        else if (destOper == GT_IND)
-        {
-            /* Set the proper indirection bits */
-
-            varRefKinds refs = varTypeIsGC(tree->TypeGet()) ? VR_IND_REF : VR_IND_SCL;
-            desc->ivaMaskInd = varRefKinds(desc->ivaMaskInd | refs);
+            return WALK_ABORT;
         }
     }
 
