@@ -5066,54 +5066,6 @@ PhaseStatus Compiler::optFindLoopsPhase()
 
 /*****************************************************************************
  *
- *  Determine the kind of interference for the call.
- */
-
-/* static */ inline Compiler::callInterf Compiler::optCallInterf(GenTreeCall* call)
-{
-    // if not a helper, kills everything
-    if (call->gtCallType != CT_HELPER)
-    {
-        return CALLINT_ALL;
-    }
-
-    // setfield and array address store kill all indirections
-    switch (eeGetHelperNum(call->gtCallMethHnd))
-    {
-        case CORINFO_HELP_ASSIGN_REF:         // Not strictly needed as we don't make a GT_CALL with this
-        case CORINFO_HELP_CHECKED_ASSIGN_REF: // Not strictly needed as we don't make a GT_CALL with this
-        case CORINFO_HELP_ASSIGN_BYREF:       // Not strictly needed as we don't make a GT_CALL with this
-        case CORINFO_HELP_SETFIELDOBJ:
-        case CORINFO_HELP_ARRADDR_ST:
-
-            return CALLINT_REF_INDIRS;
-
-        case CORINFO_HELP_SETFIELDFLOAT:
-        case CORINFO_HELP_SETFIELDDOUBLE:
-        case CORINFO_HELP_SETFIELD8:
-        case CORINFO_HELP_SETFIELD16:
-        case CORINFO_HELP_SETFIELD32:
-        case CORINFO_HELP_SETFIELD64:
-
-            return CALLINT_SCL_INDIRS;
-
-        case CORINFO_HELP_ASSIGN_STRUCT: // Not strictly needed as we don't use this
-        case CORINFO_HELP_MEMSET:        // Not strictly needed as we don't make a GT_CALL with this
-        case CORINFO_HELP_MEMCPY:        // Not strictly needed as we don't make a GT_CALL with this
-        case CORINFO_HELP_SETFIELDSTRUCT:
-
-            return CALLINT_ALL_INDIRS;
-
-        default:
-            break;
-    }
-
-    // other helpers kill nothing
-    return CALLINT_NONE;
-}
-
-/*****************************************************************************
- *
  *  See if the given tree can be computed in the given precision (which must
  *  be smaller than the type of the tree for this to make sense). If 'doit'
  *  is false, we merely check to see whether narrowing is possible; if we
@@ -5577,11 +5529,7 @@ bool Compiler::optIsVarAssigned(BasicBlock* beg, BasicBlock* end, GenTree* skip,
     isVarAssgDsc desc;
 
     desc.ivaSkip = skip;
-#ifdef DEBUG
-    desc.ivaSelf = &desc;
-#endif
-    desc.ivaVar      = var;
-    desc.ivaMaskCall = CALLINT_NONE;
+    desc.ivaVar  = var;
     AllVarSetOps::AssignNoCopy(this, desc.ivaMaskVal, AllVarSetOps::MakeEmpty(this));
 
     for (;;)
@@ -5631,7 +5579,7 @@ bool Compiler::optIsVarAssgLoop(unsigned lnum, unsigned var)
 }
 
 /*****************************************************************************/
-int Compiler::optIsSetAssgLoop(unsigned lnum, ALLVARSET_VALARG_TP vars, varRefKinds inds)
+int Compiler::optIsSetAssgLoop(unsigned lnum, ALLVARSET_VALARG_TP vars)
 {
     noway_assert(lnum < optLoopCount);
     LoopDsc* loop = &optLoopTable[lnum];
@@ -5644,14 +5592,9 @@ int Compiler::optIsSetAssgLoop(unsigned lnum, ALLVARSET_VALARG_TP vars, varRefKi
 
         /* Prepare the descriptor used by the tree walker call-back */
 
-        desc.ivaVar  = (unsigned)-1;
+        desc.ivaVar  = BAD_VAR_NUM;
         desc.ivaSkip = nullptr;
-#ifdef DEBUG
-        desc.ivaSelf = &desc;
-#endif
         AllVarSetOps::AssignNoCopy(this, desc.ivaMaskVal, AllVarSetOps::MakeEmpty(this));
-        desc.ivaMaskInd        = VR_NONE;
-        desc.ivaMaskCall       = CALLINT_NONE;
         desc.ivaMaskIncomplete = false;
 
         /* Now walk all the statements of the loop */
@@ -5670,8 +5613,6 @@ int Compiler::optIsSetAssgLoop(unsigned lnum, ALLVARSET_VALARG_TP vars, varRefKi
         }
 
         AllVarSetOps::Assign(this, loop->lpAsgVars, desc.ivaMaskVal);
-        loop->lpAsgInds = desc.ivaMaskInd;
-        loop->lpAsgCall = desc.ivaMaskCall;
 
         /* Now we know what variables are assigned in the loop */
 
@@ -5679,65 +5620,9 @@ int Compiler::optIsSetAssgLoop(unsigned lnum, ALLVARSET_VALARG_TP vars, varRefKi
     }
 
     /* Now we can finally test the caller's mask against the loop's */
-    if (!AllVarSetOps::IsEmptyIntersection(this, loop->lpAsgVars, vars) || (loop->lpAsgInds & inds))
+    if (!AllVarSetOps::IsEmptyIntersection(this, loop->lpAsgVars, vars))
     {
         return 1;
-    }
-
-    switch (loop->lpAsgCall)
-    {
-        case CALLINT_ALL:
-
-            /* Can't hoist if the call might have side effect on an indirection. */
-
-            if (loop->lpAsgInds != VR_NONE)
-            {
-                return 1;
-            }
-
-            break;
-
-        case CALLINT_REF_INDIRS:
-
-            /* Can't hoist if the call might have side effect on an ref indirection. */
-
-            if (loop->lpAsgInds & VR_IND_REF)
-            {
-                return 1;
-            }
-
-            break;
-
-        case CALLINT_SCL_INDIRS:
-
-            /* Can't hoist if the call might have side effect on an non-ref indirection. */
-
-            if (loop->lpAsgInds & VR_IND_SCL)
-            {
-                return 1;
-            }
-
-            break;
-
-        case CALLINT_ALL_INDIRS:
-
-            /* Can't hoist if the call might have side effect on any indirection. */
-
-            if (loop->lpAsgInds & (VR_IND_REF | VR_IND_SCL))
-            {
-                return 1;
-            }
-
-            break;
-
-        case CALLINT_NONE:
-
-            /* Other helpers kill nothing */
-
-            break;
-
-        default:
-            noway_assert(!"Unexpected lpAsgCall value");
     }
 
     return 0;

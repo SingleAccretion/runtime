@@ -6011,17 +6011,6 @@ public:
     void        optRemoveRedundantZeroInits();
 
 protected:
-    // This enumeration describes what is killed by a call.
-
-    enum callInterf
-    {
-        CALLINT_NONE,       // no interference                               (most helpers)
-        CALLINT_REF_INDIRS, // kills GC ref indirections                     (SETFIELD OBJ)
-        CALLINT_SCL_INDIRS, // kills non GC ref indirections                 (SETFIELD non-OBJ)
-        CALLINT_ALL_INDIRS, // kills both GC ref and non GC ref indirections (SETFIELD STRUCT)
-        CALLINT_ALL,        // kills everything                              (normal method call)
-    };
-
     enum class FieldKindForVN
     {
         SimpleStatic,
@@ -6046,9 +6035,7 @@ public:
         BasicBlock* lpBottom; // loop BOTTOM (from here we have a back edge to the TOP)
         BasicBlock* lpExit;   // if a single exit loop this is the EXIT (in most cases BOTTOM)
 
-        callInterf   lpAsgCall;     // "callInterf" for calls in the loop
-        ALLVARSET_TP lpAsgVars;     // set of vars assigned within the loop (all vars, not just tracked)
-        varRefKinds  lpAsgInds : 8; // set of inds modified within the loop
+        ALLVARSET_TP lpAsgVars; // set of vars assigned within the loop (all vars, not just tracked)
 
         LoopFlags lpFlags;
 
@@ -6395,11 +6382,19 @@ private:
     static fgWalkPreFn optIsVarAssgCB;
 
 protected:
+    struct isVarAssgDsc
+    {
+        GenTree*     ivaSkip;
+        ALLVARSET_TP ivaMaskVal;        // Set of variables assigned to.  This is a set of all vars, not tracked vars.
+        unsigned     ivaVar;            // Variable we are interested in, or -1
+        bool         ivaMaskIncomplete; // Variables not representable in ivaMaskVal were assigned to.
+    };
+
     bool optIsVarAssigned(BasicBlock* beg, BasicBlock* end, GenTree* skip, unsigned var);
 
     bool optIsVarAssgLoop(unsigned lnum, unsigned var);
 
-    int optIsSetAssgLoop(unsigned lnum, ALLVARSET_VALARG_TP vars, varRefKinds inds = VR_NONE);
+    int optIsSetAssgLoop(unsigned lnum, ALLVARSET_VALARG_TP vars);
 
     bool optNarrowTree(GenTree* tree, var_types srct, var_types dstt, ValueNumPair vnpNarrow, bool doit);
 
@@ -6600,6 +6595,7 @@ protected:
 #define FMT_CSE "CSE #%02u"
 
 public:
+    void optOptimizeCSEs();
     void optOptimizeValnumCSEs();
 
 protected:
@@ -6638,23 +6634,6 @@ protected:
     bool optConfigDisableCSE();
     bool optConfigDisableCSE2();
 #endif
-
-    void optOptimizeCSEs();
-
-    struct isVarAssgDsc
-    {
-        GenTree*     ivaSkip;
-        ALLVARSET_TP ivaMaskVal; // Set of variables assigned to.  This is a set of all vars, not tracked vars.
-#ifdef DEBUG
-        void* ivaSelf;
-#endif
-        unsigned    ivaVar;            // Variable we are interested in, or -1
-        varRefKinds ivaMaskInd;        // What kind of indirect assignments are there?
-        callInterf  ivaMaskCall;       // What kind of calls are there?
-        bool        ivaMaskIncomplete; // Variables not representable in ivaMaskVal were assigned to.
-    };
-
-    static callInterf optCallInterf(GenTreeCall* call);
 
 public:
     // VN based copy propagation.
