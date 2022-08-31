@@ -1648,11 +1648,6 @@ public:
         return OperIsMultiOp(OperGet());
     }
 
-    bool OperIsSsaDef() const
-    {
-        return OperIs(GT_ASG, GT_CALL);
-    }
-
     static bool OperIsHWIntrinsic(genTreeOps gtOper)
     {
 #ifdef FEATURE_HW_INTRINSICS

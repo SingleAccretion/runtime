@@ -863,46 +863,8 @@ private:
         unsigned   lclNum = val.LclNum();
         LclVarDsc* varDsc = m_compiler->lvaGetDesc(lclNum);
 
-        GenTreeFlags defFlag            = GTF_EMPTY;
-        GenTreeCall* callUser           = user->IsCall() ? user->AsCall() : nullptr;
-        bool         hasHiddenStructArg = false;
-        if (m_compiler->opts.compJitOptimizeStructHiddenBuffer && (callUser != nullptr) &&
-            IsValidLclAddr(lclNum, val.Offset()))
-        {
-            // We will only attempt this optimization for locals that are:
-            // a) Not susceptible to liveness bugs (see "lvaSetHiddenBufferStructArg").
-            // b) Do not later turn into indirections.
-            //
-            bool isSuitableLocal =
-                varTypeIsStruct(varDsc) && varDsc->lvIsTemp && !m_compiler->lvaIsImplicitByRefLocal(lclNum);
-#ifdef TARGET_X86
-            if (m_compiler->lvaIsArgAccessedViaVarArgsCookie(lclNum))
-            {
-                isSuitableLocal = false;
-            }
-#endif // TARGET_X86
-
-            if (isSuitableLocal && callUser->gtArgs.HasRetBuffer() &&
-                (val.Node() == callUser->gtArgs.GetRetBufferArg()->GetNode()))
-            {
-                m_compiler->lvaSetHiddenBufferStructArg(lclNum);
-                hasHiddenStructArg = true;
-                callUser->gtCallMoreFlags |= GTF_CALL_M_RETBUFFARG_LCLOPT;
-                defFlag = GTF_VAR_DEF;
-
-                if ((val.Offset() != 0) ||
-                    (varDsc->lvExactSize() != m_compiler->typGetObjLayout(callUser->gtRetClsHnd)->GetSize()))
-                {
-                    defFlag |= GTF_VAR_USEASG;
-                }
-            }
-        }
-
-        if (!hasHiddenStructArg)
-        {
-            m_compiler->lvaSetVarAddrExposed(
-                varDsc->lvIsStructField ? varDsc->lvParentLcl : lclNum DEBUGARG(AddressExposedReason::ESCAPE_ADDRESS));
-        }
+        m_compiler->lvaSetVarAddrExposed(
+            varDsc->lvIsStructField ? varDsc->lvParentLcl : val.LclNum() DEBUGARG(AddressExposedReason::ESCAPE_ADDRESS));
 
 #ifdef TARGET_64BIT
         // If the address of a variable is passed in a call and the allocation size of the variable
@@ -910,7 +872,8 @@ private:
         // a ByRef to an INT32 when they actually write a SIZE_T or INT64. There are cases where
         // overwriting these extra 4 bytes corrupts some data (such as a saved register) that leads
         // to A/V. Whereas previously the JIT64 codegen did not lead to an A/V.
-        if ((callUser != nullptr) && !varDsc->lvIsParam && !varDsc->lvIsStructField && genActualTypeIsInt(varDsc))
+        if ((user != nullptr) && user->IsCall() && !varDsc->lvIsParam && !varDsc->lvIsStructField &&
+            genActualTypeIsInt(varDsc))
         {
             varDsc->lvQuirkToLong = true;
             JITDUMP("Adding a quirk for the storage size of V%02u of type %s\n", val.LclNum(),
@@ -919,7 +882,6 @@ private:
 #endif // TARGET_64BIT
 
         MorphLocalAddress(val.Node(), lclNum, val.Offset());
-        val.Node()->gtFlags |= defFlag;
 
         INDEBUG(val.Consume();)
     }

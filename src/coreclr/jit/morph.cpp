@@ -1820,12 +1820,6 @@ void CallArgs::EvalArgsToTemps(Compiler* comp, GenTreeCall* call)
         if (setupArg != nullptr)
         {
             arg.SetEarlyNode(setupArg);
-
-            // Make sure we do not break recognition of retbuf-as-local
-            // optimization here. If this is hit it indicates that we are
-            // unnecessarily creating temps for some ret buf addresses, and
-            // gtCallGetDefinedRetBufLclAddr relies on this not to happen.
-            noway_assert((arg.GetWellKnownArg() != WellKnownArg::RetBuffer) || !call->IsOptimizingRetBufAsLocal());
         }
 
         arg.SetLateNode(defArg);
@@ -7906,8 +7900,7 @@ GenTree* Compiler::fgMorphCall(GenTreeCall* call)
     call = fgMorphArgs(call);
     noway_assert(call->gtOper == GT_CALL);
 
-    // Try to replace CORINFO_HELP_TYPEHANDLE_TO_RUNTIMETYPE with a constant gc handle
-    // pointing to a frozen segment
+    // Try to replace CORINFO_HELP_TYPEHANDLE_TO_RUNTIMETYPE with a constant gc handle pointing to a frozen segment.
     if (!gtIsActiveCSE_Candidate(call) && gtIsTypeHandleToRuntimeTypeHelper(call))
     {
         GenTree*             argNode = call->AsCall()->gtArgs.GetArgByIndex(0)->GetNode();
@@ -7924,13 +7917,6 @@ GenTree* Compiler::fgMorphCall(GenTreeCall* call)
                 return fgMorphTree(retNode);
             }
         }
-    }
-
-    // Assign DEF flags if it produces a definition from "return buffer".
-    fgAssignSetVarDef(call);
-    if (call->OperRequiresAsgFlag())
-    {
-        call->gtFlags |= GTF_ASG;
     }
 
     // Should we expand this virtual method call target early here?
@@ -13033,7 +13019,7 @@ void Compiler::fgMorphTreeDone(GenTree* tree, bool optAssertionPropDone, bool is
         // DefinesLocal can return true for some BLK op uses, so
         // check what gets assigned only when we're at an assignment.
         //
-        if (tree->OperIsSsaDef() && tree->DefinesLocal(this, &lclVarTree))
+        if (tree->OperIs(GT_ASG) && tree->DefinesLocal(this, &lclVarTree))
         {
             const unsigned lclNum = lclVarTree->GetLclNum();
             noway_assert(lclNum < lvaCount);

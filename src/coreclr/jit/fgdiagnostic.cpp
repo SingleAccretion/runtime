@@ -4100,7 +4100,7 @@ public:
     {
         GenTree* const tree = *use;
 
-        if (tree->OperIsSsaDef())
+        if (tree->OperIs(GT_ASG))
         {
             ProcessDefs(tree);
         }

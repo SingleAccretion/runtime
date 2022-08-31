@@ -4755,6 +4755,7 @@ void Lowering::LowerCallByRefStruct(GenTreeCall* call)
     GenTreeLclVarCommon* dstLclAddr = nullptr;
     if (retBufAddr->DefinesLocalAddr(&dstLclAddr))
     {
+        assert((dstLclAddr->gtFlags & GTF_VAR_DEF) != 0); // LIR liveness relies on this being set.
         unsigned lclNum = dstLclAddr->GetLclNum();
 
         if (retBufArg->GetWellKnownArg() == WellKnownArg::RetBuffer)

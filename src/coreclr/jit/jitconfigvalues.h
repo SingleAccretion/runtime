@@ -72,9 +72,6 @@ CONFIG_INTEGER(JitHideAlignBehindJmp,
                1) // If set, try to hide align instruction (if any) behind an unconditional jump instruction (if any)
                   // that is present before the loop start.
 
-CONFIG_INTEGER(JitOptimizeStructHiddenBuffer, W("JitOptimizeStructHiddenBuffer"), 1) // Track assignments to locals done
-                                                                                     // through return buffers.
-
 CONFIG_INTEGER(JitUnrollLoopMaxIterationCount,
                W("JitUnrollLoopMaxIterationCount"),
                DEFAULT_UNROLL_LOOP_MAX_ITERATION_COUNT)

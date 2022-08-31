@@ -47,7 +47,7 @@ void Compiler::optBlockCopyPropPopStacks(BasicBlock* block, LclNumToLiveDefsMap*
         for (GenTree* const tree : stmt->TreeList())
         {
             GenTreeLclVarCommon* lclDefNode = nullptr;
-            if (tree->OperIsSsaDef() && tree->DefinesLocal(this, &lclDefNode))
+            if (tree->OperIs(GT_ASG) && tree->DefinesLocal(this, &lclDefNode))
             {
                 if (lclDefNode->HasCompositeSsaName())
                 {
@@ -285,7 +285,7 @@ bool Compiler::optCopyProp(
 // optCopyPropPushDef: Push the new live SSA def on the stack for "lclNode".
 //
 // Arguments:
-//    defNode    - The definition node for this def (GT_ASG/GT_CALL) (will be "nullptr" for "use" defs)
+//    defNode    - The definition node for this def (GT_ASG) (will be "nullptr" for "use" defs)
 //    lclNode    - The local tree representing "the def" (that can actually be a use)
 //    curSsaName - The map of local numbers to stacks of their defs
 //
@@ -388,7 +388,7 @@ bool Compiler::optBlockCopyProp(BasicBlock* block, LclNumToLiveDefsMap* curSsaNa
             treeLifeUpdater.UpdateLife(tree);
 
             GenTreeLclVarCommon* lclDefNode = nullptr;
-            if (tree->OperIsSsaDef() && tree->DefinesLocal(this, &lclDefNode))
+            if (tree->OperIs(GT_ASG) && tree->DefinesLocal(this, &lclDefNode))
             {
                 optCopyPropPushDef(tree, lclDefNode, curSsaName);
             }

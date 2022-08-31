@@ -9679,9 +9679,6 @@ public:
         // If set, tries to hide alignment instructions behind unconditional jumps.
         bool compJitHideAlignBehindJmp;
 
-        // If set, tracks the hidden return buffer for struct arg.
-        bool compJitOptimizeStructHiddenBuffer;
-
         // Iteration limit to unroll a loop.
         unsigned short compJitUnrollLoopMaxIterationCount;
 

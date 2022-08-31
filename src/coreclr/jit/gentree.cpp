@@ -9211,7 +9211,7 @@ DONE:
         // Update side effect flags since they may be different from the source side effect flags.
         // For example, we may have replaced some locals with constants and made indirections non-throwing.
         gtUpdateNodeSideEffects(copy);
-        if ((varNum != BAD_VAR_NUM) && copy->OperIsSsaDef())
+        if ((varNum != BAD_VAR_NUM) && copy->OperIs(GT_ASG))
         {
             fgAssignSetVarDef(copy);
         }
@@ -17370,38 +17370,6 @@ bool GenTree::DefinesLocal(
             return true;
         }
     }
-    else if (OperIs(GT_CALL))
-    {
-        GenTreeLclVarCommon* lclAddr = comp->gtCallGetDefinedRetBufLclAddr(AsCall());
-        if (lclAddr == nullptr)
-        {
-            return false;
-        }
-
-        *pLclVarTree = lclAddr;
-
-        if ((pIsEntire != nullptr) || (pSize != nullptr))
-        {
-            unsigned storeSize = comp->typGetObjLayout(AsCall()->gtRetClsHnd)->GetSize();
-
-            if (pIsEntire != nullptr)
-            {
-                *pIsEntire = storeSize == comp->lvaLclExactSize(lclAddr->GetLclNum());
-            }
-
-            if (pSize != nullptr)
-            {
-                *pSize = storeSize;
-            }
-        }
-
-        if (pOffset != nullptr)
-        {
-            *pOffset = lclAddr->GetLclOffs();
-        }
-
-        return true;
-    }
 
     return false;
 }
@@ -18671,7 +18639,7 @@ bool Compiler::gtIsTypeof(GenTree* tree, CORINFO_CLASS_HANDLE* handle)
 //   call - The call node
 //
 // Returns:
-//   A tree representing the address of a local.
+//   A tree representing the address of a local, if there was one.
 //
 GenTreeLclVarCommon* Compiler::gtCallGetDefinedRetBufLclAddr(GenTreeCall* call)
 {

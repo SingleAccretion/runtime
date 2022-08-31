@@ -6113,23 +6113,14 @@ bool Compiler::optIsVarAssignedWithDesc(Statement* stmt, isVarAssgDsc* dsc)
         {
             GenTree* const tree = *use;
 
-            // Can this tree define a local?
-            //
-            if (!tree->OperIsSsaDef())
-            {
-                return WALK_CONTINUE;
-            }
-
             // Determine what's written and check for calls.
             //
             if (tree->OperIs(GT_CALL))
             {
                 m_dsc->ivaMaskCall = optCallInterf(tree->AsCall());
             }
-            else
+            else if (tree->OperIs(GT_ASG))
             {
-                assert(tree->OperIs(GT_ASG));
-
                 genTreeOps destOper = tree->gtGetOp1()->OperGet();
                 if (destOper == GT_LCL_FLD)
                 {
@@ -6150,31 +6141,31 @@ bool Compiler::optIsVarAssignedWithDesc(Statement* stmt, isVarAssgDsc* dsc)
                     varRefKinds refs  = varTypeIsGC(tree->TypeGet()) ? VR_IND_REF : VR_IND_SCL;
                     m_dsc->ivaMaskInd = varRefKinds(m_dsc->ivaMaskInd | refs);
                 }
-            }
 
-            // Determine if the tree modifies a particular local
-            //
-            GenTreeLclVarCommon* lcl = nullptr;
-            if (tree->DefinesLocal(m_compiler, &lcl))
-            {
-                const unsigned lclNum = lcl->GetLclNum();
-
-                if (lclNum < lclMAX_ALLSET_TRACKED)
-                {
-                    AllVarSetOps::AddElemD(m_compiler, m_dsc->ivaMaskVal, lclNum);
-                }
-                else
-                {
-                    m_dsc->ivaMaskIncomplete = true;
-                }
-
-                // Bail out if we were checking for one particular local
-                // and we now see it's modified (ignoring perhaps
-                // the one tree where we expect modifications).
+                // Determine if the tree modifies a particular local
                 //
-                if ((lclNum == m_dsc->ivaVar) && (tree != m_dsc->ivaSkip))
+                GenTreeLclVarCommon* lcl = nullptr;
+                if (tree->DefinesLocal(m_compiler, &lcl))
                 {
-                    return WALK_ABORT;
+                    const unsigned lclNum = lcl->GetLclNum();
+
+                    if (lclNum < lclMAX_ALLSET_TRACKED)
+                    {
+                        AllVarSetOps::AddElemD(m_compiler, m_dsc->ivaMaskVal, lclNum);
+                    }
+                    else
+                    {
+                        m_dsc->ivaMaskIncomplete = true;
+                    }
+
+                    // Bail out if we were checking for one particular local
+                    // and we now see it's modified (ignoring perhaps
+                    // the one tree where we expect modifications).
+                    //
+                    if ((lclNum == m_dsc->ivaVar) && (tree != m_dsc->ivaSkip))
+                    {
+                        return WALK_ABORT;
+                    }
                 }
             }
 
@@ -9164,10 +9155,7 @@ void Compiler::optRemoveRedundantZeroInits()
 
                         break;
                     }
-                    // case GT_CALL:
-                    // TODO-CQ: Need to remove redundant zero-inits for "return buffer".
-                    // assert(!"Need to handle zero inits.\n");
-                    // break;
+
                     case GT_ASG:
                     {
                         GenTreeOp* treeOp = tree->AsOp();

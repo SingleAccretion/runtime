@@ -11718,19 +11718,6 @@ void Compiler::fgValueNumberCall(GenTreeCall* call)
         // For now, arbitrary side effect on GcHeap/ByrefExposed.
         fgMutateGcHeap(call DEBUGARG("CALL"));
     }
-
-    // If the call generates a definition, because it uses "return buffer", then VN the local
-    // as well.
-    GenTreeLclVarCommon* lclVarTree = nullptr;
-    ssize_t              offset     = 0;
-    unsigned             storeSize  = 0;
-    if (call->DefinesLocal(this, &lclVarTree, /* pIsEntire */ nullptr, &offset, &storeSize))
-    {
-        ValueNumPair storeValue;
-        storeValue.SetBoth(vnStore->VNForExpr(compCurBB, TYP_STRUCT));
-
-        fgValueNumberLocalStore(call, lclVarTree, offset, storeSize, storeValue);
-    }
 }
 
 void Compiler::fgValueNumberCastHelper(GenTreeCall* call)
