@@ -3374,12 +3374,6 @@ void Compiler::impImportAndPushBox(CORINFO_RESOLVED_TOKEN* pResolvedToken)
         // the opcode stack becomes empty
         impBoxTempInUse = true;
 
-        // Remember the current last statement in case we need to move
-        // a range of statements to ensure the box temp is initialized
-        // before it's used.
-        //
-        Statement* const cursor = impLastStmt;
-
         const bool useParent = false;
         op1                  = gtNewAllocObjNode(pResolvedToken, useParent);
         if (op1 == nullptr)
@@ -3401,75 +3395,6 @@ void Compiler::impImportAndPushBox(CORINFO_RESOLVED_TOKEN* pResolvedToken)
         //
         GenTree*   asg     = gtNewTempAssign(impBoxTemp, op1);
         Statement* asgStmt = impAppendTree(asg, CHECK_SPILL_NONE, impCurStmtDI);
-
-        // If the exprToBox is a call that returns its value via a ret buf arg,
-        // move the assignment statement(s) before the call (which must be a top level tree).
-        //
-        // We do this because impAssignStructPtr (invoked below) will
-        // back-substitute into a call when it sees a GT_RET_EXPR and the call
-        // has a hidden buffer pointer, So we need to reorder things to avoid
-        // creating out-of-sequence IR.
-        //
-        if (varTypeIsStruct(exprToBox) && exprToBox->OperIs(GT_RET_EXPR))
-        {
-            GenTreeCall* const call = exprToBox->AsRetExpr()->gtInlineCandidate->AsCall();
-
-            if (call->ShouldHaveRetBufArg())
-            {
-                JITDUMP("Must insert newobj stmts for box before call [%06u]\n", dspTreeID(call));
-
-                // Walk back through the statements in this block, looking for the one
-                // that has this call as the root node.
-                //
-                // Because gtNewTempAssign (above) may have added statements that
-                // feed into the actual assignment we need to move this set of added
-                // statements as a group.
-                //
-                // Note boxed allocations are side-effect free (no com or finalizer) so
-                // our only worries here are (correctness) not overlapping the box temp
-                // lifetime and (perf) stretching the temp lifetime across the inlinee
-                // body.
-                //
-                // Since this is an inline candidate, we must be optimizing, and so we have
-                // a unique box temp per call. So no worries about overlap.
-                //
-                assert(!opts.OptimizationDisabled());
-
-                // Lifetime stretching could addressed with some extra cleverness--sinking
-                // the allocation back down to just before the copy, once we figure out
-                // where the copy is. We defer for now.
-                //
-                Statement* insertBeforeStmt = cursor;
-                noway_assert(insertBeforeStmt != nullptr);
-
-                while (true)
-                {
-                    if (insertBeforeStmt->GetRootNode() == call)
-                    {
-                        break;
-                    }
-
-                    // If we've searched all the statements in the block and failed to
-                    // find the call, then something's wrong.
-                    //
-                    noway_assert(insertBeforeStmt != impStmtList);
-
-                    insertBeforeStmt = insertBeforeStmt->GetPrevStmt();
-                }
-
-                // Found the call. Move the statements comprising the assignment.
-                //
-                JITDUMP("Moving " FMT_STMT "..." FMT_STMT " before " FMT_STMT "\n", cursor->GetNextStmt()->GetID(),
-                        asgStmt->GetID(), insertBeforeStmt->GetID());
-                assert(asgStmt == impLastStmt);
-                do
-                {
-                    Statement* movingStmt = impExtractLastStmt();
-                    impInsertStmtBefore(movingStmt, insertBeforeStmt);
-                    insertBeforeStmt = movingStmt;
-                } while (impLastStmt != cursor);
-            }
-        }
 
         // Create a pointer to the box payload in op1.
         //
