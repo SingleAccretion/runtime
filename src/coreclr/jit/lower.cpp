@@ -4716,36 +4716,6 @@ void Lowering::LowerCallByRefStruct(GenTreeCall* call)
 
         assert(retBufAddr != nullptr);
 
-        call->ChangeType(TYP_VOID);
-
-        WellKnownArg argKind      = call->ShouldHaveRetBufArg() ? WellKnownArg::RetBuffer : WellKnownArg::None;
-        NewCallArg   newRetBufArg = NewCallArg::Primitive(retBufAddr).WellKnown(argKind);
-        CallArg*     retBufArg    = call->gtArgs.InsertAfterThisOrFirst(comp, newRetBufArg);
-        regNumber    retBufReg    = call->gtArgs.HasThisPointer() ? REG_ARG_1 : REG_ARG_0;
-        if (hasFixedRetBuffReg() && (argKind == WellKnownArg::RetBuffer))
-        {
-            // TODO-RetBuf: handle the non-reg case.
-            retBufReg = theFixedRetBuffReg();
-        }
-
-        retBufArg->AbiInfo.ArgType = retBufAddr->TypeGet();
-        retBufArg->AbiInfo.SetByteSize(TARGET_POINTER_SIZE, TARGET_POINTER_SIZE, false, false);
-        if (retBufReg != REG_STK)
-        {
-            retBufArg->AbiInfo.SetRegNum(0, retBufReg);
-            retBufArg->AbiInfo.NumRegs = 1;
-
-            // Maintain the invariant that all register args are late.
-            retBufArg->SetEarlyNode(nullptr);
-            retBufArg->SetLateNode(retBufAddr);
-            call->gtArgs.PushLateBack(retBufArg);
-        }
-        else
-        {
-            // TODO-RetBuf: handle the non-reg case.
-            retBufArg->AbiInfo.ByteOffset = 0;
-        }
-
         GenTreeLclVarCommon* dstLclAddr = nullptr;
         if (retBufAddr->DefinesLocalAddr(&dstLclAddr))
         {
@@ -4759,6 +4729,9 @@ void Lowering::LowerCallByRefStruct(GenTreeCall* call)
                 comp->lvaSetVarDoNotEnregister(lclNum DEBUGARG(DoNotEnregisterReason::HiddenBufferStructArg));
             }
         }
+
+        call->ChangeType(TYP_VOID);
+        CallArg* retBufArg = call->gtArgs.AttachEffectiveRetBufferArg(retBufAddr);
 
         LowerArg(call, retBufArg, retBufArg->GetEarlyNode() == nullptr);
     }

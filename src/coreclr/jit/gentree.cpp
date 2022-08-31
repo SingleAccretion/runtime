@@ -1376,6 +1376,13 @@ unsigned CallArgABIInformation::GetStackByteSize() const
 #ifdef DEBUG
 void NewCallArg::ValidateTypes()
 {
+    if (Node == nullptr)
+    {
+        // This is the effective return buffer argument.
+        assert(SignatureType == TYP_BYREF);
+        return;
+    }
+
     assert(Compiler::impCheckImplicitArgumentCoercion(SignatureType, Node->TypeGet()));
 
     if (varTypeIsStruct(SignatureType))
@@ -1470,7 +1477,7 @@ void CallArg::CheckIsStruct()
     }
     else
     {
-        assert(!varTypeIsStruct(node));
+        assert((node == nullptr) || !varTypeIsStruct(node));
     }
 }
 #endif
@@ -1478,6 +1485,7 @@ void CallArg::CheckIsStruct()
 CallArgs::CallArgs()
     : m_head(nullptr)
     , m_lateHead(nullptr)
+    , m_effectiveRetBufferArg(nullptr)
     , m_nextStackByteOffset(0)
 #ifdef UNIX_X86_ABI
     , m_stkSizeBytes(0)
@@ -1871,6 +1879,135 @@ regNumber CallArgs::GetCustomRegister(Compiler* comp, CorInfoCallConvExtension c
 bool CallArgs::IsNonStandard(Compiler* comp, GenTreeCall* call, CallArg* arg)
 {
     return GetCustomRegister(comp, call->GetUnmanagedCallConv(), arg->GetWellKnownArg()) != REG_NA;
+}
+
+void CallArgs::CreateEffectiveRetBufferArg(Compiler* comp, GenTreeCall* call)
+{
+    if (!call->TreatAsShouldHaveRetBufArg(comp))
+    {
+        return;
+    }
+
+    // Some calls have an "out buffer" that is not actually a ret buff in the
+    // ABI sense. We take the path here for those but it should not be marked
+    // as the ret buff arg since it always follow the normal ABI for parameters.
+    WellKnownArg wellKnownArgType = call->ShouldHaveRetBufArg() ? WellKnownArg::RetBuffer : WellKnownArg::None;
+    NewCallArg   newArg           = NewCallArg::Primitive(nullptr, TYP_BYREF).WellKnown(wellKnownArgType);
+    CallArg*     arg              = nullptr;
+
+#if !defined(TARGET_ARM)
+    // Unmanaged instance methods on Windows or Unix X86 need the retbuf arg after the first (this) parameter
+    if ((TargetOS::IsWindows || compUnixX86Abi()) && call->IsUnmanaged())
+    {
+        CorInfoCallConvExtension cc = call->GetUnmanagedCallConv();
+
+        if (callConvIsInstanceMethodCallConv(cc))
+        {
+#ifdef TARGET_X86
+            // The argument list has already been reversed. Insert the return
+            // buffer as the second-to-last node  so it will be pushed on to
+            // the stack after the user args but before the native this arg as
+            // required by the native ABI.
+            if (Args().begin() == Args().end())
+            {
+                // Empty arg list
+                arg = PushFront(comp, newArg);
+            }
+            else if (cc == CorInfoCallConvExtension::Thiscall)
+            {
+                // For thiscall, the "this" parameter is not included in the argument list reversal,
+                // so we need to put the return buffer as the last parameter.
+                arg = PushBack(comp, newArg);
+            }
+            else if (Args().begin()->GetNext() == nullptr)
+            {
+                // Only 1 arg, so insert at beginning
+                arg = PushFront(comp, newArg);
+            }
+            else
+            {
+                // Find second last arg
+                CallArg* secondLastArg = nullptr;
+                for (CallArg& arg : Args())
+                {
+                    assert(arg.GetNext() != nullptr);
+                    if (arg.GetNext()->GetNext() == nullptr)
+                    {
+                        secondLastArg = &arg;
+                        break;
+                    }
+                }
+
+                assert(secondLastArg && "Expected to find second last arg");
+                arg = InsertAfter(comp, secondLastArg, newArg);
+            }
+#else
+            if (Args().begin() == Args().end())
+            {
+                arg = PushFront(comp, newArg);
+            }
+            else
+            {
+                arg = InsertAfter(comp, Args().begin().GetArg(), newArg);
+            }
+#endif
+        }
+        else
+        {
+#ifdef TARGET_X86
+            // The argument list has already been reversed.
+            // Insert the return buffer as the last node so it will be pushed on to the stack last
+            // as required by the native ABI.
+            arg = PushBack(comp, newArg);
+#else
+            // Insert the return value buffer into the argument list as first byref parameter
+            arg = PushFront(comp, newArg);
+#endif
+        }
+    }
+    else
+#endif // !defined(TARGET_ARM)
+    {
+        // Insert the return value buffer into the argument list as first byref parameter after 'this'
+        arg = InsertAfterThisOrFirst(comp, newArg);
+    }
+
+    m_effectiveRetBufferArg = arg;
+}
+
+void CallArgs::DetachEffectiveRetBufferArg()
+{
+    if (m_effectiveRetBufferArg != nullptr)
+    {
+        Remove(m_effectiveRetBufferArg);
+    }
+}
+
+CallArg* CallArgs::AttachEffectiveRetBufferArg(GenTree* node)
+{
+    assert(varTypeIsI(node) && (m_effectiveRetBufferArg != nullptr));
+
+    // We re-attach the return buffer argument in LIR, at which point the ordering does not matter.
+    // Just set it as the first argument for simplicity.
+    CallArg* arg            = m_effectiveRetBufferArg;
+    m_effectiveRetBufferArg = nullptr;
+
+    arg->SetNext(m_head);
+    m_head = arg;
+    AddedWellKnownArg(arg->GetWellKnownArg());
+
+    if (arg->AbiInfo.IsPassedInRegisters())
+    {
+        // Maintain the invariant that all register args are late.
+        arg->SetLateNode(node);
+        PushLateBack(arg);
+    }
+    else
+    {
+        arg->SetEarlyNode(node);
+    }
+
+    return arg;
 }
 
 //---------------------------------------------------------------
@@ -2327,9 +2464,9 @@ int GenTreeCall::GetNonStandardAddedArgCount(Compiler* compiler) const
 //
 // Return Value:
 //     Returns true if we treat the call as if it has a retBuf argument
-//     This method may actually have a retBuf argument
-//     or it could be a JIT helper that we are still transforming during
-//     the importer phase.
+//     This method may actually have a retBuf argument or it could be a
+//     JIT helper with an "out buffer" for a struct value that we'd like
+//     to treat like a struct-returning call for optimization purposes.
 //
 // Notes:
 //     On ARM64 marking the method with the GTF_CALL_M_RETBUFFARG flag
@@ -2516,6 +2653,9 @@ void CallArgs::ResetFinalArgsAndABIInfo()
             link = &(*link)->NextRef();
         }
     }
+
+    JITDUMP("Removing the effective return buffer arg to prepare for re-morphing call\n");
+    m_effectiveRetBufferArg = nullptr;
 
     m_abiInformationDetermined = false;
 }
@@ -9137,6 +9277,25 @@ void CallArgs::InternalCopyFrom(Compiler* comp, CallArgs* other, CopyNodeFunc co
         carg->AbiInfo           = arg.AbiInfo;
         *tail                   = carg;
         tail                    = &carg->m_next;
+    }
+
+    // TODO-RetBuf: get rid of code duplication.
+    if (other->m_effectiveRetBufferArg != nullptr)
+    {
+        CallArg& arg            = *other->m_effectiveRetBufferArg;
+        CallArg* carg           = new (comp, CMK_CallArgs) CallArg();
+        carg->m_earlyNode       = arg.m_earlyNode != nullptr ? copyNode(arg.m_earlyNode) : nullptr;
+        carg->m_lateNode        = arg.m_lateNode != nullptr ? copyNode(arg.m_lateNode) : nullptr;
+        carg->m_signatureClsHnd = arg.m_signatureClsHnd;
+        carg->m_tmpNum          = arg.m_tmpNum;
+        carg->m_signatureType   = arg.m_signatureType;
+        carg->m_wellKnownArg    = arg.m_wellKnownArg;
+        carg->m_needTmp         = arg.m_needTmp;
+        carg->m_needPlace       = arg.m_needPlace;
+        carg->m_isTmp           = arg.m_isTmp;
+        carg->m_processed       = arg.m_processed;
+        carg->AbiInfo           = arg.AbiInfo;
+        m_effectiveRetBufferArg = carg;
     }
 
     // Now copy late pointers. Note that these may not come in order.

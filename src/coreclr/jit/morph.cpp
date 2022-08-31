@@ -744,7 +744,16 @@ const char* getWellKnownArgName(WellKnownArg arg)
 //
 void CallArg::Dump(Compiler* comp)
 {
-    printf("CallArg[[%06u].%s", comp->dspTreeID(GetNode()), GenTree::OpName(GetNode()->OperGet()));
+    printf("CallArg");
+    GenTree* node = GetNode();
+    if (node != nullptr)
+    {
+        printf("[[%06u].%s", comp->dspTreeID(node), GenTree::OpName(node->OperGet()));
+    }
+    else
+    {
+        printf("[[------]");
+    }
     printf(" %s", varTypeName(m_signatureType));
     printf(" (%s)", AbiInfo.PassedByRef ? "By ref" : "By value");
     if (AbiInfo.GetRegNum() != REG_STK)
@@ -1961,7 +1970,7 @@ void CallArgs::AddFinalArgsAndDetermineABIInfo(Compiler* comp, GenTreeCall* call
     unsigned intArgRegNum = 0;
     unsigned fltArgRegNum = 0;
 
-    bool callHasRetBuffArg = HasRetBuffer();
+    bool callHasRetBuffArg = call->ShouldHaveRetBufArg();
     bool callIsVararg      = IsVarArgs();
 
 #ifdef TARGET_ARM
@@ -2007,6 +2016,8 @@ void CallArgs::AddFinalArgsAndDetermineABIInfo(Compiler* comp, GenTreeCall* call
     // in the implementation of fast tail call.
     // *********** END NOTE *********
     CLANG_FORMAT_COMMENT_ANCHOR;
+
+    CreateEffectiveRetBufferArg(comp, call);
 
 #if defined(TARGET_ARM)
     // A non-standard calling convention using wrapper delegate invoke is used on ARM, only, for wrapper
@@ -2223,12 +2234,12 @@ void CallArgs::AddFinalArgsAndDetermineABIInfo(Compiler* comp, GenTreeCall* call
 
     for (CallArg& arg : Args())
     {
-        assert(arg.GetEarlyNode() != nullptr);
+        assert((arg.GetEarlyNode() != nullptr) || (&arg == m_effectiveRetBufferArg));
         GenTree* argx = arg.GetEarlyNode();
 
         // TODO-Cleanup: this is duplicative with the code in args morphing, however, also kicks in for
         // "non-standard" (return buffer on ARM64) arguments. Fix args morphing and delete this code.
-        if (argx->OperIsLocalAddr())
+        if ((argx != nullptr) && argx->OperIsLocalAddr())
         {
             argx->gtType = TYP_I_IMPL;
         }
@@ -2776,7 +2787,6 @@ void CallArgs::AddFinalArgsAndDetermineABIInfo(Compiler* comp, GenTreeCall* call
 #endif // TARGET_ARM
 
         arg.AbiInfo          = CallArgABIInformation();
-        arg.AbiInfo.ArgType  = argx->TypeGet();
         arg.AbiInfo.IsStruct = isStructArg;
 
         if (isRegArg)
@@ -3003,7 +3013,7 @@ void CallArgs::AddFinalArgsAndDetermineABIInfo(Compiler* comp, GenTreeCall* call
         }
         else
         {
-            arg.AbiInfo.ArgType = argx->TypeGet();
+            arg.AbiInfo.ArgType = (argx != nullptr) ? argx->TypeGet() : argSigType;
         }
 
         argIndex++;
@@ -3021,6 +3031,8 @@ void CallArgs::AddFinalArgsAndDetermineABIInfo(Compiler* comp, GenTreeCall* call
         JITDUMP("\n");
     }
 #endif
+
+    DetachEffectiveRetBufferArg();
 
     m_abiInformationDetermined = true;
 }
@@ -3491,7 +3503,7 @@ GenTreeCall* Compiler::fgMorphArgs(GenTreeCall* call)
     // If we are remorphing or don't have any register arguments or other arguments that need
     // temps, then we don't need to call SortArgs() and EvalArgsToTemps().
     //
-    if (!reMorphing && (call->gtArgs.HasRegArgs() || call->gtArgs.NeedsTemps()))
+    if (!reMorphing && !call->gtArgs.IsEmpty() && (call->gtArgs.HasRegArgs() || call->gtArgs.NeedsTemps()))
     {
         // Do the 'defer or eval to temp' analysis.
         call->gtArgs.EvalArgsToTemps(this, call);

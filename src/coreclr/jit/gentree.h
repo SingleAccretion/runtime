@@ -4533,7 +4533,7 @@ struct NewCallArg
 
     static NewCallArg Primitive(GenTree* node, var_types type = TYP_UNDEF)
     {
-        assert(!varTypeIsStruct(node) && !varTypeIsStruct(type));
+        assert(((node == nullptr) || !varTypeIsStruct(node)) && !varTypeIsStruct(type));
         NewCallArg arg;
         arg.Node          = node;
         arg.SignatureType = type == TYP_UNDEF ? node->TypeGet() : type;
@@ -4655,6 +4655,7 @@ class CallArgs
 {
     CallArg* m_head;
     CallArg* m_lateHead;
+    CallArg* m_effectiveRetBufferArg;
 
     unsigned m_nextStackByteOffset;
 #ifdef UNIX_X86_ABI
@@ -4685,6 +4686,8 @@ class CallArgs
     void AddedWellKnownArg(WellKnownArg arg);
     void RemovedWellKnownArg(WellKnownArg arg);
     regNumber GetCustomRegister(Compiler* comp, CorInfoCallConvExtension cc, WellKnownArg arg);
+    void CreateEffectiveRetBufferArg(Compiler* comp, GenTreeCall* call);
+    void DetachEffectiveRetBufferArg();
     void SplitArg(CallArg* arg, unsigned numRegs, unsigned numSlots);
     void SortArgs(Compiler* comp, GenTreeCall* call, CallArg** sortedArgs);
 
@@ -4715,6 +4718,7 @@ public:
     CallArg* InsertAfterUnchecked(Compiler* comp, CallArg* after, const NewCallArg& arg);
     CallArg* InsertInstParam(Compiler* comp, GenTree* node);
     CallArg* InsertAfterThisOrFirst(Compiler* comp, const NewCallArg& arg);
+    CallArg* AttachEffectiveRetBufferArg(GenTree* node);
     void PushLateBack(CallArg* arg);
     void Remove(CallArg* arg);
 
@@ -5125,31 +5129,14 @@ struct GenTreeCall final : public GenTree
     bool HasNonStandardAddedArgs(Compiler* compiler) const;
     int GetNonStandardAddedArgCount(Compiler* compiler) const;
 
-    // Returns true if the ABI dictates that this call should get a ret buf
-    // arg. This may be out of sync with gtArgs.HasRetBuffer during import
-    // until we actually create the ret buffer.
+    // Returns true if the ABI dictates that this call should get a ret buf arg.
+    // This may be out of sync with gtArgs.HasRetBuffer until we actually create
+    // the ret buffer.
     bool ShouldHaveRetBufArg() const
     {
         return (gtCallMoreFlags & GTF_CALL_M_RETBUFFARG) != 0;
     }
 
-    //-------------------------------------------------------------------------
-    // TreatAsShouldHaveRetBufArg:
-    //
-    // Arguments:
-    //     compiler, the compiler instance so that we can call eeGetHelperNum
-    //
-    // Return Value:
-    //     Returns true if we treat the call as if it has a retBuf argument
-    //     This method may actually have a retBuf argument
-    //     or it could be a JIT helper that we are still transforming during
-    //     the importer phase.
-    //
-    // Notes:
-    //     On ARM64 marking the method with the GTF_CALL_M_RETBUFFARG flag
-    //     will make ShouldHaveRetBufArg() return true, but will also force the
-    //     use of register x8 to pass the RetBuf argument.
-    //
     bool TreatAsShouldHaveRetBufArg(Compiler* compiler) const;
 
     //-----------------------------------------------------------------------------------------
