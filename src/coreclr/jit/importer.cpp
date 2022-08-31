@@ -946,103 +946,6 @@ GenTree* Compiler::impAssignStruct(GenTree*         dest,
 
     if (src->IsCall())
     {
-        GenTreeCall* srcCall = src->AsCall();
-        if (srcCall->TreatAsShouldHaveRetBufArg(this))
-        {
-            // Case of call returning a struct via hidden retbuf arg.
-            // Some calls have an "out buffer" that is not actually a ret buff
-            // in the ABI sense. We take the path here for those but it should
-            // not be marked as the ret buff arg since it always follow the
-            // normal ABI for parameters.
-            WellKnownArg wellKnownArgType =
-                srcCall->ShouldHaveRetBufArg() ? WellKnownArg::RetBuffer : WellKnownArg::None;
-
-            GenTree*   destAddr = impGetStructAddr(dest, srcCall->gtRetClsHnd, CHECK_SPILL_ALL, /* willDeref */ true);
-            NewCallArg newArg   = NewCallArg::Primitive(destAddr).WellKnown(wellKnownArgType);
-
-#if !defined(TARGET_ARM)
-            // Unmanaged instance methods on Windows or Unix X86 need the retbuf arg after the first (this) parameter
-            if ((TargetOS::IsWindows || compUnixX86Abi()) && srcCall->IsUnmanaged())
-            {
-                if (callConvIsInstanceMethodCallConv(srcCall->GetUnmanagedCallConv()))
-                {
-#ifdef TARGET_X86
-                    // The argument list has already been reversed. Insert the
-                    // return buffer as the second-to-last node  so it will be
-                    // pushed on to the stack after the user args but before
-                    // the native this arg as required by the native ABI.
-                    if (srcCall->gtArgs.Args().begin() == srcCall->gtArgs.Args().end())
-                    {
-                        // Empty arg list
-                        srcCall->gtArgs.PushFront(this, newArg);
-                    }
-                    else if (srcCall->GetUnmanagedCallConv() == CorInfoCallConvExtension::Thiscall)
-                    {
-                        // For thiscall, the "this" parameter is not included in the argument list reversal,
-                        // so we need to put the return buffer as the last parameter.
-                        srcCall->gtArgs.PushBack(this, newArg);
-                    }
-                    else if (srcCall->gtArgs.Args().begin()->GetNext() == nullptr)
-                    {
-                        // Only 1 arg, so insert at beginning
-                        srcCall->gtArgs.PushFront(this, newArg);
-                    }
-                    else
-                    {
-                        // Find second last arg
-                        CallArg* secondLastArg = nullptr;
-                        for (CallArg& arg : srcCall->gtArgs.Args())
-                        {
-                            assert(arg.GetNext() != nullptr);
-                            if (arg.GetNext()->GetNext() == nullptr)
-                            {
-                                secondLastArg = &arg;
-                                break;
-                            }
-                        }
-
-                        assert(secondLastArg && "Expected to find second last arg");
-                        srcCall->gtArgs.InsertAfter(this, secondLastArg, newArg);
-                    }
-
-#else
-                    if (srcCall->gtArgs.Args().begin() == srcCall->gtArgs.Args().end())
-                    {
-                        srcCall->gtArgs.PushFront(this, newArg);
-                    }
-                    else
-                    {
-                        srcCall->gtArgs.InsertAfter(this, srcCall->gtArgs.Args().begin().GetArg(), newArg);
-                    }
-#endif
-                }
-                else
-                {
-#ifdef TARGET_X86
-                    // The argument list has already been reversed.
-                    // Insert the return buffer as the last node so it will be pushed on to the stack last
-                    // as required by the native ABI.
-                    srcCall->gtArgs.PushBack(this, newArg);
-#else
-                    // insert the return value buffer into the argument list as first byref parameter
-                    srcCall->gtArgs.PushFront(this, newArg);
-#endif
-                }
-            }
-            else
-#endif // !defined(TARGET_ARM)
-            {
-                // insert the return value buffer into the argument list as first byref parameter after 'this'
-                srcCall->gtArgs.InsertAfterThisOrFirst(this, newArg);
-            }
-
-            // now returns void, not a struct
-            src->gtType = TYP_VOID;
-
-            // return the morphed call node
-            return src;
-        }
-
 #ifdef UNIX_AMD64_ABI
         if (dest->OperIs(GT_LCL_VAR))
         {
@@ -1050,27 +953,6 @@ GenTree* Compiler::impAssignStruct(GenTree*         dest,
             lvaGetDesc(dest->AsLclVar())->lvIsMultiRegRet = true;
         }
 #endif // UNIX_AMD64_ABI
-    }
-    else if (src->OperIs(GT_RET_EXPR))
-    {
-        assert(src->AsRetExpr()->gtInlineCandidate->OperIs(GT_CALL));
-        GenTreeCall* call = src->AsRetExpr()->gtInlineCandidate;
-
-        if (call->ShouldHaveRetBufArg())
-        {
-            // insert the return value buffer into the argument list as first byref parameter after 'this'
-            GenTree* destAddr = impGetStructAddr(dest, call->gtRetClsHnd, CHECK_SPILL_ALL, /* willDeref */ true);
-            call->gtArgs.InsertAfterThisOrFirst(this,
-                                                NewCallArg::Primitive(destAddr).WellKnown(WellKnownArg::RetBuffer));
-
-            // now returns void, not a struct
-            src->gtType  = TYP_VOID;
-            call->gtType = TYP_VOID;
-
-            // We already have appended the write to 'dest' GT_CALL's args
-            // So now we just return an empty node (pruning the GT_RET_EXPR)
-            return src;
-        }
     }
     else if (src->OperIs(GT_MKREFANY))
     {
@@ -11167,13 +11049,9 @@ bool Compiler::impReturnInstruction(int prefixFlags, OPCODE& opcode)
             // reimported, but retExpr won't get cleared as part of setting the block to
             // be reimported. The reimported retExpr value should be the same, so even if
             // we don't unconditionally overwrite it, it shouldn't matter.
-            if (info.compRetNativeType != TYP_STRUCT)
+            if ((info.compRetNativeType != TYP_STRUCT) || !IsMultiRegReturnedType(retClsHnd, info.compCallConv))
             {
-                // compRetNativeType is not TYP_STRUCT.
-                // This implies it could be either a scalar type or SIMD vector type or
-                // a struct type that can be normalized to a scalar type.
-
-                if (varTypeIsStruct(info.compRetType))
+                if (!varTypeIsStruct(info.compRetType))
                 {
                     noway_assert(info.compRetBuffArg == BAD_VAR_NUM);
                     // Handle calls with "fake" return buffers.
@@ -11253,12 +11131,10 @@ bool Compiler::impReturnInstruction(int prefixFlags, OPCODE& opcode)
                 // Report the return expression
                 inlRetExpr->gtSubstExpr = op2;
             }
-            else
+            else // A struct returned in multiple registers.
             {
-                // compRetNativeType is TYP_STRUCT.
-                // This implies that struct return via RetBuf arg or multi-reg struct return.
-
                 GenTreeCall* iciCall = impInlineInfo->iciCall->AsCall();
+                assert(!iciCall->ShouldHaveRetBufArg());
 
                 // Assign the inlinee return into a spill temp.
                 if (fgNeedReturnSpillTemp())
@@ -11291,23 +11167,7 @@ bool Compiler::impReturnInstruction(int prefixFlags, OPCODE& opcode)
                 }
                 else // The struct was to be returned via a return buffer.
                 {
-                    assert(iciCall->gtArgs.HasRetBuffer());
-                    GenTree* dest = gtCloneExpr(iciCall->gtArgs.GetRetBufferArg()->GetEarlyNode());
-
-                    if (fgNeedReturnSpillTemp())
-                    {
-                        // If this is the first return we have seen set the retExpr.
-                        if (inlRetExpr->gtSubstExpr == nullptr)
-                        {
-                            inlRetExpr->gtSubstExpr =
-                                impAssignStructPtr(dest, gtNewLclvNode(lvaInlineeReturnSpillTemp, info.compRetType),
-                                                   retClsHnd, CHECK_SPILL_ALL);
-                        }
-                    }
-                    else
-                    {
-                        inlRetExpr->gtSubstExpr = impAssignStructPtr(dest, op2, retClsHnd, CHECK_SPILL_ALL);
-                    }
+                    unreached()
                 }
             }
 
