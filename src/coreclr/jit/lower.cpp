@@ -4635,61 +4635,81 @@ void Lowering::LowerCallByRefStruct(GenTreeCall* call)
 
     assert(call->TreatAsShouldHaveRetBufArg(comp) && !call->gtArgs.HasRetBuffer());
 
-    // First off, find the user. Note it will not *yet* be lowered.
     LIR::Use callUse;
+    GenTree* retBufAddr = nullptr;
+    GenTree* lclStore   = nullptr;
     if (BlockRange().TryGetUse(call, &callUse))
     {
-        GenTree* user       = callUse.User();
-        GenTree* retBufAddr = nullptr;
-        GenTree* lclStore   = nullptr;
+        GenTree* user = callUse.User();
 
-        switch (user->OperGet())
+        // Native ABIs, unlike the managed one, do not allow retbufs to alias anything,
+        // so we only try to optimize "direct construction" cases for managed calls.
+        if (!call->IsUnmanaged())
         {
-            case GT_STORE_BLK:
-            case GT_STORE_OBJ:
-            case GT_STOREIND:
+            switch (user->OperGet())
             {
-                // The address can be both before and after the call (in case of reversal).
-                // If it is after, try and see if it can be moved to before and used directly.
-                // If not, we'll spill the call's result to a temp and store that.
-                GenTree* addr = user->AsIndir()->Addr();
-
-                if (call->Precedes(addr))
+                case GT_STORE_BLK:
+                case GT_STORE_OBJ:
+                case GT_STOREIND:
                 {
-                    // We need to make sure the whole address tree is safe to move to just before
-                    // (this is a choice) the call. We will make a simplifying assumption that all
-                    // nodes between the call and store are part of the address. This will almost
-                    // always be the case, and if not, it's just a conservative overestimate.
-                    //
-                    if (IsSafeToContainMem(user, call))
+                    // The address can be both before and after the call (in case of reversal).
+                    // If it is after, try and see if it can be moved to before and used directly.
+                    // If not, we'll spill the call's result to a temp and store that.
+                    GenTree*           addr             = user->AsIndir()->Addr();
+                    bool               addrIsAfterCall  = false;
+                    LIR::ReadOnlyRange callToStoreRange =
+                        (call->gtNext == user) ? LIR::ReadOnlyRange() : LIR::ReadOnlyRange(call->gtNext, user->gtPrev);
+                    for (GenTree* node : callToStoreRange)
                     {
-                        BlockRange().InsertBefore(call, BlockRange().Remove(LIR::ReadOnlyRange(call->gtNext, user)));
+                        if (node == addr)
+                        {
+                            addrIsAfterCall = true;
+                            break;
+                        }
+                    }
+
+                    if (addrIsAfterCall)
+                    {
+                        // We need to make sure the whole address tree is safe to move to just before
+                        // (this is a choice) the call. We will make a simplifying assumption that all
+                        // nodes between the call and store are part of the address. This will almost
+                        // always be the case, and if not, it's just a conservative overestimate.
+                        //
+                        if (IsSafeToContainMem(user, call))
+                        {
+                            LowerRange(callToStoreRange);
+                            BlockRange().InsertBefore(call, BlockRange().Remove(std::move(callToStoreRange)));
+                            BlockRange().Remove(user);
+
+                            retBufAddr = addr;
+                        }
+                        else
+                        {
+                            callUse.ReplaceWithLclVar(comp, BAD_VAR_NUM, &lclStore);
+                        }
+                    }
+                    else // Just make "call" the new user of the address.
+                    {
                         BlockRange().Remove(user);
 
                         retBufAddr = addr;
                     }
-                    else
-                    {
-                        callUse.ReplaceWithLclVar(comp, BAD_VAR_NUM, &lclStore);
-                    }
                 }
-                else // Just make "call" the new user of the address.
-                {
-                    BlockRange().Remove(user);
+                break;
 
-                    retBufAddr = addr;
-                }
+                case GT_STORE_LCL_VAR:
+                case GT_STORE_LCL_FLD:
+                    lclStore = user;
+                    break;
+
+                default:
+                    callUse.ReplaceWithLclVar(comp, BAD_VAR_NUM, &lclStore);
+                    break;
             }
-            break;
-
-            case GT_STORE_LCL_VAR:
-            case GT_STORE_LCL_FLD:
-                lclStore = user;
-                break;
-
-            default:
-                callUse.ReplaceWithLclVar(comp, BAD_VAR_NUM, &lclStore);
-                break;
+        }
+        else
+        {
+            callUse.ReplaceWithLclVar(comp, BAD_VAR_NUM, &lclStore);
         }
 
         if (lclStore != nullptr)
@@ -4713,32 +4733,43 @@ void Lowering::LowerCallByRefStruct(GenTreeCall* call)
 
             retBufAddr = lclStore;
         }
-
-        assert(retBufAddr != nullptr);
-
-        GenTreeLclVarCommon* dstLclAddr = nullptr;
-        if (retBufAddr->DefinesLocalAddr(&dstLclAddr))
-        {
-            call->gtCallMoreFlags |= GTF_CALL_M_RETBUFFARG_LCLOPT;
-
-            unsigned   lclNum = dstLclAddr->GetLclNum();
-            LclVarDsc* varDsc = comp->lvaGetDesc(lclNum);
-            INDEBUG(varDsc->lvHiddenBufferStructArg = 1);
-            if (!varDsc->lvDoNotEnregister)
-            {
-                comp->lvaSetVarDoNotEnregister(lclNum DEBUGARG(DoNotEnregisterReason::HiddenBufferStructArg));
-            }
-        }
-
-        call->ChangeType(TYP_VOID);
-        CallArg* retBufArg = call->gtArgs.AttachEffectiveRetBufferArg(retBufAddr);
-
-        LowerArg(call, retBufArg, retBufArg->GetEarlyNode() == nullptr);
     }
-    else
+    else // An unused call - use dummy local as the destination.
     {
-        NYI("Unused return buffer call");
+        unsigned lclNum = comp->lvaGrabTemp(true DEBUGARG("dummy return buffer for an unused call"));
+        comp->lvaSetStruct(lclNum, call->gtRetClsHnd, false);
+
+        GenTree* lclAddr = comp->gtNewLclVarAddrNode(lclNum);
+        lclAddr->gtFlags |= GTF_VAR_DEF;
+        BlockRange().InsertBefore(call, lclAddr);
+
+        retBufAddr = lclAddr;
     }
+
+    assert(retBufAddr != nullptr);
+
+    call->ClearUnusedValue();
+    call->ChangeType(TYP_VOID);
+    CallArg* retBufArg = call->gtArgs.AttachEffectiveRetBufferArg(retBufAddr);
+
+    GenTreeLclVarCommon* dstLclAddr = nullptr;
+    if (retBufAddr->DefinesLocalAddr(&dstLclAddr))
+    {
+        unsigned lclNum = dstLclAddr->GetLclNum();
+
+        if (retBufArg->GetWellKnownArg() == WellKnownArg::RetBuffer)
+        {
+            call->gtFlags |= GTF_ASG;
+            call->gtCallMoreFlags |= GTF_CALL_M_RETBUFFARG_LCLOPT;
+            comp->lvaSetHiddenBufferStructArg(lclNum);
+        }
+        else
+        {
+            comp->lvaSetVarAddrExposed(lclNum DEBUGARG(AddressExposedReason::ESCAPE_ADDRESS));
+        }
+    }
+
+    LowerArg(call, retBufArg, retBufArg->GetEarlyNode() == nullptr);
 }
 
 //----------------------------------------------------------------------------------------------
