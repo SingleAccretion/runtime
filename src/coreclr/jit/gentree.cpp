@@ -1996,7 +1996,7 @@ CallArg* CallArgs::AttachEffectiveRetBufferArg(GenTree* node)
     m_head = arg;
     AddedWellKnownArg(arg->GetWellKnownArg());
 
-    if (arg->AbiInfo.IsPassedInRegisters())
+    if (arg->AbiInfo.IsPassedInRegisters() && AreArgsComplete())
     {
         // Maintain the invariant that all register args are late.
         arg->SetLateNode(node);

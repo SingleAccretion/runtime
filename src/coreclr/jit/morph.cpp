@@ -5606,6 +5606,7 @@ bool Compiler::fgCanFastTailCall(GenTreeCall* callee, const char** failReason)
 #endif // DEBUG
     };
 
+    // TODO-RetBuf: this is missing the return buffer argument.
     for (CallArg& arg : callee->gtArgs.Args())
     {
         calleeArgStackSize = roundUp(calleeArgStackSize, arg.AbiInfo.ByteAlignment);
@@ -5710,15 +5711,11 @@ bool Compiler::fgCanFastTailCall(GenTreeCall* callee, const char** failReason)
         return false;
     }
 
-    if (callee->gtArgs.HasRetBuffer())
+    // If callee has RetBuf param, caller too must have it. Otherwise go the slow route.
+    if (callee->ShouldHaveRetBufArg() && (info.compRetBuffArg == BAD_VAR_NUM))
     {
-        // If callee has RetBuf param, caller too must have it.
-        // Otherwise go the slow route.
-        if (info.compRetBuffArg == BAD_VAR_NUM)
-        {
-            reportFastTailCallDecision("Callee has RetBuf but caller does not.");
-            return false;
-        }
+        reportFastTailCallDecision("Callee has RetBuf but caller does not.");
+        return false;
     }
 
     // For a fast tail call the caller will use its incoming arg stack space to place
@@ -5939,24 +5936,6 @@ GenTree* Compiler::fgMorphPotentialTailCall(GenTreeCall* call)
         return nullptr;
     }
 #endif
-
-    // We have to ensure to pass the incoming retValBuf as the
-    // outgoing one. Using a temp will not do as this function will
-    // not regain control to do the copy. This can happen when inlining
-    // a tailcall which also has a potential tailcall in it: the IL looks
-    // like we can do a tailcall, but the trees generated use a temp for the inlinee's
-    // result. TODO-CQ: Fix this.
-    if (info.compRetBuffArg != BAD_VAR_NUM)
-    {
-        noway_assert(call->TypeGet() == TYP_VOID);
-        noway_assert(call->gtArgs.HasRetBuffer());
-        GenTree* retValBuf = call->gtArgs.GetRetBufferArg()->GetNode();
-        if (retValBuf->gtOper != GT_LCL_VAR || retValBuf->AsLclVarCommon()->GetLclNum() != info.compRetBuffArg)
-        {
-            failTailCall("Need to copy return buffer");
-            return nullptr;
-        }
-    }
 
     // We are still not sure whether it can be a tail call. Because, when converting
     // a call to an implicit tail call, we must check that there are no locals with
@@ -6483,11 +6462,10 @@ GenTree* Compiler::fgMorphPotentialTailCall(GenTreeCall* call)
 
         if (isRootReplaced)
         {
-            // We have replaced the root node of this stmt and deleted the rest,
-            // but we still have the deleted, dead nodes on the `fgMorph*` stack
-            // if the root node was an `ASG`, `RET` or `CAST`.
-            // Return a zero con node to exit morphing of the old trees without asserts
-            // and forbid POST_ORDER morphing doing something wrong with our call.
+            // We have replaced the root node of this stmt and deleted the rest, but we still have the deleted, dead
+            // nodes on the `fgMorph*` stack if the root node was an `ASG`, `RET` or `CAST`. Return a zero con node
+            // to exit morphing of the old trees without asserts and forbid POST_ORDER morphing doing something wrong
+            // with our call.
             var_types zeroType = (origCallType == TYP_STRUCT) ? TYP_INT : genActualType(origCallType);
             result             = fgMorphTree(gtNewZeroConNode(zeroType));
         }
@@ -6522,7 +6500,7 @@ void Compiler::fgValidateIRForTailCall(GenTreeCall* call)
     public:
         enum
         {
-            DoPostOrder       = true,
+            DoPreOrder        = true,
             UseExecutionOrder = true,
         };
 
@@ -6531,7 +6509,7 @@ void Compiler::fgValidateIRForTailCall(GenTreeCall* call)
         {
         }
 
-        fgWalkResult PostOrderVisit(GenTree** use, GenTree* user)
+        fgWalkResult PreOrderVisit(GenTree** use, GenTree* user)
         {
             GenTree* tree = *use;
 
@@ -6543,14 +6521,35 @@ void Compiler::fgValidateIRForTailCall(GenTreeCall* call)
                     m_prevVal = m_tailcall;
                 }
 
-                return WALK_CONTINUE;
+                return WALK_SKIP_SUBTREES;
             }
 
             if (tree->OperIs(GT_RETURN))
             {
-                assert((tree->TypeIs(TYP_VOID) || ValidateUse(tree->gtGetOp1())) &&
-                       "Expected return to be result of tailcall");
+                GenTree* returnValue = tree->gtGetOp1();
+                if (m_tailcall->ShouldHaveRetBufArg())
+                {
+                    assert((tree->TypeIs(TYP_VOID) || IsRetBuffer(returnValue)) &&
+                           "Expected result to be caller's return buffer arg or void");
+                }
+                else
+                {
+                    assert(((tree->TypeIs(TYP_VOID) && m_tailcall->TypeIs(TYP_VOID)) || ValidateUse(returnValue)) &&
+                           "Expected return to be result of tailcall");
+                }
+
                 return WALK_ABORT;
+            }
+
+            if (tree->OperIs(GT_ASG) && tree->gtGetOp1()->OperIsIndir())
+            {
+                assert(m_tailcall->ShouldHaveRetBufArg() &&
+                       "Expected the tailcall to have a return buffer - the caller has one");
+                assert((IsRetBuffer(tree->gtGetOp1()->AsIndir()->Addr()) && ValidateUse(tree->gtGetOp2())) &&
+                       "Expected store to the return buffer to consume the tailcall value");
+                m_prevVal = nullptr; // No more uses expected.
+
+                return WALK_SKIP_SUBTREES;
             }
 
             // GT_NOP might appear due to assignments that end up as
@@ -6578,53 +6577,31 @@ void Compiler::fgValidateIRForTailCall(GenTreeCall* call)
                        "Expected LHS of assignment to be local and RHS of assignment to be result of tailcall");
                 m_prevVal = tree->gtGetOp1();
             }
-            else if (tree->OperIs(GT_LCL_VAR))
-            {
-                assert((ValidateUse(tree) || (user->OperIs(GT_ASG) && user->gtGetOp1() == tree)) &&
-                       "Expected use of local to be tailcall value or LHS of assignment");
-            }
             else
             {
                 DISPTREE(tree);
                 assert(!"Unexpected tree op after call marked as tailcall");
             }
 
-            return WALK_CONTINUE;
+            return WALK_SKIP_SUBTREES;
         }
 
         bool ValidateUse(GenTree* node)
         {
+            assert(m_prevVal != nullptr);
+
             if (m_prevVal->OperIs(GT_LCL_VAR))
             {
                 return node->OperIs(GT_LCL_VAR) &&
                        (node->AsLclVar()->GetLclNum() == m_prevVal->AsLclVar()->GetLclNum());
             }
-            else if (m_prevVal == m_tailcall)
-            {
-                if (node == m_tailcall)
-                {
-                    return true;
-                }
 
-                // If we do not use the call value directly we might have
-                // passed this function's ret buffer arg, so verify that is
-                // being used.
-                CallArg* retBufferArg = m_tailcall->gtArgs.GetRetBufferArg();
-                if (retBufferArg != nullptr)
-                {
-                    GenTree* retBufferNode = retBufferArg->GetNode();
-                    return retBufferNode->OperIs(GT_LCL_VAR) &&
-                           (retBufferNode->AsLclVar()->GetLclNum() == m_compiler->info.compRetBuffArg) &&
-                           node->OperIs(GT_LCL_VAR) &&
-                           (node->AsLclVar()->GetLclNum() == m_compiler->info.compRetBuffArg);
-                }
+            return node == m_prevVal;
+        }
 
-                return false;
-            }
-            else
-            {
-                return node == m_prevVal;
-            }
+        bool IsRetBuffer(GenTree* node)
+        {
+            return node->OperIs(GT_LCL_VAR) && (node->AsLclVar()->GetLclNum() == m_compiler->info.compRetBuffArg);
         }
     };
 
@@ -6709,15 +6686,6 @@ GenTree* Compiler::fgMorphTailCallViaHelpers(GenTreeCall* call, CORINFO_TAILCALL
     call->gtArgs.ResetFinalArgsAndABIInfo();
 
     GenTree* callDispatcherAndGetResult = fgCreateCallDispatcherAndGetResult(call, help.hCallTarget, help.hDispatcher);
-
-    // Change the call to a call to the StoreArgs stub.
-    if (call->gtArgs.HasRetBuffer())
-    {
-        JITDUMP("Removing retbuf");
-
-        call->gtArgs.Remove(call->gtArgs.GetRetBufferArg());
-        call->gtCallMoreFlags &= ~GTF_CALL_M_RETBUFFARG;
-    }
 
     const bool stubNeedsTargetFnPtr = (help.flags & CORINFO_TAILCALL_STORE_TARGET) != 0;
 
@@ -6861,7 +6829,8 @@ GenTree* Compiler::fgMorphTailCallViaHelpers(GenTreeCall* call, CORINFO_TAILCALL
     call->gtCallType    = CT_USER_FUNC;
     call->gtCallMethHnd = help.hStoreArgs;
     call->gtFlags &= ~GTF_CALL_VIRT_KIND_MASK;
-    call->gtCallMoreFlags &= ~(GTF_CALL_M_TAILCALL | GTF_CALL_M_DELEGATE_INV | GTF_CALL_M_WRAPPER_DELEGATE_INV);
+    call->gtCallMoreFlags &=
+        ~(GTF_CALL_M_TAILCALL | GTF_CALL_M_DELEGATE_INV | GTF_CALL_M_WRAPPER_DELEGATE_INV | GTF_CALL_M_RETBUFFARG);
 
     // The store-args stub returns no value.
     call->gtRetClsHnd  = nullptr;
@@ -6889,7 +6858,7 @@ GenTree* Compiler::fgMorphTailCallViaHelpers(GenTreeCall* call, CORINFO_TAILCALL
 // fgCreateCallDispatcherAndGetResult: Given a call
 // CALL
 //   {callTarget}
-//   {retbuf}
+//   {retbuf} (implicit)
 //   {this}
 //   {args}
 // create a similarly typed node that calls the tailcall dispatcher and returns
@@ -6924,9 +6893,10 @@ GenTree* Compiler::fgCreateCallDispatcherAndGetResult(GenTreeCall*          orig
     GenTree*     retVal    = nullptr;
     unsigned int newRetLcl = BAD_VAR_NUM;
 
+    // TODO-Args: this is now pessimized (if correct) path. Restore the return buffer optimization.
     if (origCall->gtArgs.HasRetBuffer())
     {
-        JITDUMP("Transferring retbuf\n");
+        JITDUMP("Using the retbuf\n");
         GenTree* retBufArg = origCall->gtArgs.GetRetBufferArg()->GetNode();
 
         assert(info.compRetBuffArg != BAD_VAR_NUM);
@@ -15230,25 +15200,25 @@ void Compiler::fgMarkDemotedImplicitByRefArgs()
 //
 bool Compiler::fgCheckStmtAfterTailCall()
 {
-
     // For void calls, we would have created a GT_CALL in the stmt list.
-    // For non-void calls, we would have created a GT_RETURN(GT_CAST(GT_CALL)).
-    // For calls returning structs, we would have a void call, followed by a void return.
+    // For non-void calls, we would have created a GT_RETURN(optional GT_CAST(GT_CALL)).
     // For debuggable code, it would be an assignment of the call to a temp
-    // We want to get rid of any of this extra trees, and just leave
-    // the call.
-    Statement* callStmt = fgMorphStmt;
-
+    // We want to get rid of any of this extra trees, and just leave the call.
+    Statement* callStmt      = fgMorphStmt;
     Statement* nextMorphStmt = callStmt->GetNextStmt();
 
-    // Check that the rest stmts in the block are in one of the following pattern:
-    //  1) ret(void)
-    //  2) ret(cast*(callResultLclVar))
-    //  3) lclVar = callResultLclVar, the actual ret(lclVar) in another block
-    //  4) nop
+    // Check that the stmts in the block are one of the following patterns:
+    //  1) *retBuf = call; ret(void/byref)
+    //  2) lclVar = call; [... lclVarTwo = lclVar ...]; *retBuf = lclVarLast; ret(void/byref)
+    //  3) ret(call)
+    //  4) lclVar = call; [... lclVarTwo = lclVar ...]; ret(lclVarLast)
+    //  5) call; ret(void)
+    // The above may be interpersed with NOPs or casts (for small scalar returns).
+    //
     if (nextMorphStmt != nullptr)
     {
         GenTree* callExpr = callStmt->GetRootNode();
+
         if (callExpr->gtOper != GT_ASG)
         {
             // The next stmt can be GT_RETURN(TYP_VOID) or GT_RETURN(lclVar),
@@ -15261,8 +15231,16 @@ bool Compiler::fgCheckStmtAfterTailCall()
         }
         else
         {
-            noway_assert(callExpr->gtGetOp1()->OperIsLocal());
-            unsigned callResultLclNumber = callExpr->gtGetOp1()->AsLclVarCommon()->GetLclNum();
+            GenTree* callValueDest       = callExpr->gtGetOp1();
+            unsigned callResultLclNumber = BAD_VAR_NUM;
+            if (callValueDest->OperIs(GT_LCL_VAR))
+            {
+                callResultLclNumber = callValueDest->AsLclVar()->GetLclNum();
+            }
+            else
+            {
+                noway_assert(callValueDest->AsIndir()->Addr()->AsLclVar()->GetLclNum() == info.compRetBuffArg);
+            }
 
 #if FEATURE_TAILCALL_OPT_SHARED_RETURN
 
@@ -15279,13 +15257,12 @@ bool Compiler::fgCheckStmtAfterTailCall()
                     nextMorphStmt = nextMorphStmt->GetNextStmt();
                     continue;
                 }
-                Statement* moveStmt = nextMorphStmt;
-                GenTree*   moveExpr = nextMorphStmt->GetRootNode();
-                GenTree*   moveDest = moveExpr->gtGetOp1();
-                noway_assert(moveDest->OperIsLocal());
+                Statement* moveStmt   = nextMorphStmt;
+                GenTree*   moveExpr   = nextMorphStmt->GetRootNode();
+                GenTree*   moveDest   = moveExpr->gtGetOp1();
+                GenTree*   moveSource = moveExpr->gtGetOp2();
 
                 // Tunnel through any casts on the source side.
-                GenTree* moveSource = moveExpr->gtGetOp2();
                 while (moveSource->OperIs(GT_CAST))
                 {
                     noway_assert(!moveSource->gtOverflow());
@@ -15293,11 +15270,20 @@ bool Compiler::fgCheckStmtAfterTailCall()
                 }
                 noway_assert(moveSource->OperIsLocal());
 
-                // Verify we're just passing the value from one local to another
-                // along the chain.
+                // Verify we're just passing the value from one local to another along the chain.
                 const unsigned srcLclNum = moveSource->AsLclVarCommon()->GetLclNum();
                 noway_assert(srcLclNum == callResultLclNumber);
-                const unsigned dstLclNum = moveDest->AsLclVarCommon()->GetLclNum();
+
+                if (moveDest->OperIsIndir())
+                {
+                    assert(moveDest->AsIndir()->Addr()->AsLclVar()->GetLclNum() == info.compRetBuffArg);
+                    callResultLclNumber = BAD_VAR_NUM;
+                    nextMorphStmt       = nextMorphStmt->GetNextStmt();
+                    break;
+                }
+
+                noway_assert(moveDest->OperIsLocal());
+                const unsigned dstLclNum = moveDest->AsLclVar()->GetLclNum();
                 callResultLclNumber      = dstLclNum;
 
                 nextMorphStmt = moveStmt->GetNextStmt();
@@ -15307,16 +15293,23 @@ bool Compiler::fgCheckStmtAfterTailCall()
             {
                 Statement* retStmt = nextMorphStmt;
                 GenTree*   retExpr = nextMorphStmt->GetRootNode();
+                GenTree*   retVal  = retExpr->gtGetOp1();
                 noway_assert(retExpr->gtOper == GT_RETURN);
 
-                GenTree* treeWithLcl = retExpr->gtGetOp1();
-                while (treeWithLcl->gtOper == GT_CAST)
+                if (callResultLclNumber != BAD_VAR_NUM)
                 {
-                    noway_assert(!treeWithLcl->gtOverflow());
-                    treeWithLcl = treeWithLcl->gtGetOp1();
-                }
+                    while (retVal->gtOper == GT_CAST)
+                    {
+                        noway_assert(!retVal->gtOverflow());
+                        retVal = retVal->gtGetOp1();
+                    }
 
-                noway_assert(callResultLclNumber == treeWithLcl->AsLclVarCommon()->GetLclNum());
+                    noway_assert(callResultLclNumber == retVal->AsLclVarCommon()->GetLclNum());
+                }
+                else
+                {
+                    noway_assert((retVal == nullptr) || (retVal->AsLclVar()->GetLclNum() == info.compRetBuffArg));
+                }
 
                 nextMorphStmt = retStmt->GetNextStmt();
             }

@@ -4630,6 +4630,8 @@ void Lowering::LowerCallByRefStruct(GenTreeCall* call)
     if (call->gtArgs.HasRetBuffer())
     {
         // Nothing to do.
+        // TODO-RetBuf: consider materializing these late as well?
+        assert(call->IsTailCall());
         return;
     }
 
