@@ -2087,6 +2087,11 @@ GenTree* Lowering::LowerCall(GenTree* node)
     }
 #endif
 
+    if (call->TreatAsShouldHaveRetBufArg(comp))
+    {
+        LowerCallByRefStruct(call);
+    }
+
     call->ClearOtherRegs();
     LowerArgsForCall(call);
 
@@ -4526,12 +4531,6 @@ void Lowering::LowerCallStruct(GenTreeCall* call)
 {
     assert(varTypeIsStruct(call));
 
-    if (call->TreatAsShouldHaveRetBufArg(comp))
-    {
-        LowerCallByRefStruct(call);
-        return;
-    }
-
     if (call->HasMultiRegRetVal())
     {
         return;
@@ -4627,20 +4626,20 @@ void Lowering::LowerCallStruct(GenTreeCall* call)
 
 void Lowering::LowerCallByRefStruct(GenTreeCall* call)
 {
-    if (call->gtArgs.HasRetBuffer())
-    {
-        // Nothing to do.
-        // TODO-RetBuf: consider materializing these late as well?
-        assert(call->IsTailCall());
-        return;
-    }
-
     assert(call->TreatAsShouldHaveRetBufArg(comp) && !call->gtArgs.HasRetBuffer());
 
     LIR::Use callUse;
     GenTree* retBufAddr = nullptr;
     GenTree* lclStore   = nullptr;
-    if (BlockRange().TryGetUse(call, &callUse))
+    if (call->TypeIs(TYP_VOID))
+    {
+        assert(call->IsTailCall() && !call->IsHelperCall()); // Helpers wouldn't report the byref properly.
+        GenTree* callerRetBuf = comp->gtNewLclvNode(comp->info.compRetBuffArg, TYP_BYREF);
+        BlockRange().InsertBefore(call, callerRetBuf);
+
+        retBufAddr = callerRetBuf;
+    }
+    else if (BlockRange().TryGetUse(call, &callUse))
     {
         GenTree* user = callUse.User();
 
@@ -4650,6 +4649,11 @@ void Lowering::LowerCallByRefStruct(GenTreeCall* call)
         {
             switch (user->OperGet())
             {
+                case GT_STORE_LCL_VAR:
+                case GT_STORE_LCL_FLD:
+                    lclStore = user;
+                    break;
+
                 case GT_STORE_BLK:
                 case GT_STORE_OBJ:
                 case GT_STOREIND:
@@ -4699,14 +4703,15 @@ void Lowering::LowerCallByRefStruct(GenTreeCall* call)
                 }
                 break;
 
-                case GT_STORE_LCL_VAR:
-                case GT_STORE_LCL_FLD:
-                    lclStore = user;
-                    break;
-
                 default:
-                    callUse.ReplaceWithLclVar(comp, BAD_VAR_NUM, &lclStore);
-                    break;
+                {
+                    unsigned lclNum = callUse.ReplaceWithLclVar(comp, BAD_VAR_NUM, &lclStore);
+                    if (user->OperIs(GT_RETURN) && comp->compMethodReturnsMultiRegRetType())
+                    {
+                        comp->lvaGetDesc(lclNum)->lvIsMultiRegRet = true;
+                    }
+                }
+                break;
             }
         }
         else
@@ -4771,8 +4776,6 @@ void Lowering::LowerCallByRefStruct(GenTreeCall* call)
             comp->lvaSetVarAddrExposed(lclNum DEBUGARG(AddressExposedReason::ESCAPE_ADDRESS));
         }
     }
-
-    LowerArg(call, retBufArg, retBufArg->GetEarlyNode() == nullptr);
 }
 
 //----------------------------------------------------------------------------------------------

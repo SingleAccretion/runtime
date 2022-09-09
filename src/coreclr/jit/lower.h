@@ -145,8 +145,8 @@ private:
     void LowerStoreLocCommon(GenTreeLclVarCommon* lclVar);
     void LowerRetStruct(GenTreeUnOp* ret);
     void LowerRetSingleRegStructLclVar(GenTreeUnOp* ret);
-    void LowerCallStruct(GenTreeCall* call);
     void LowerCallByRefStruct(GenTreeCall* call);
+    void LowerCallStruct(GenTreeCall* call);
     void LowerStoreSingleRegCallStruct(GenTreeBlk* store);
 #if !defined(WINDOWS_AMD64_ABI)
     GenTreeLclVar* SpillStructCallResult(GenTreeCall* call) const;
