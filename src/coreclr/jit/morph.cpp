@@ -2226,7 +2226,7 @@ void CallArgs::AddFinalArgsAndDetermineABIInfo(Compiler* comp, GenTreeCall* call
     SYSTEMV_AMD64_CORINFO_STRUCT_REG_PASSING_DESCRIPTOR structDesc;
 #endif // UNIX_AMD64_ABI
 
-    for (CallArg& arg : Args())
+    for (CallArg& arg : AbiArgs())
     {
         assert((arg.GetEarlyNode() != nullptr) || (&arg == m_effectiveRetBufferArg));
         GenTree* argx = arg.GetEarlyNode();
@@ -3018,15 +3018,13 @@ void CallArgs::AddFinalArgsAndDetermineABIInfo(Compiler* comp, GenTreeCall* call
     {
         JITDUMP("Args for call [%06u] %s after AddFinalArgsAndDetermineABIInfo:\n", comp->dspTreeID(call),
                 GenTree::OpName(call->gtOper));
-        for (CallArg& arg : Args())
+        for (CallArg& arg : AbiArgs())
         {
             arg.Dump(comp);
         }
         JITDUMP("\n");
     }
 #endif
-
-    DetachEffectiveRetBufferArg();
 
     m_abiInformationDetermined = true;
 }
@@ -5606,8 +5604,7 @@ bool Compiler::fgCanFastTailCall(GenTreeCall* callee, const char** failReason)
 #endif // DEBUG
     };
 
-    // TODO-RetBuf: this is missing the return buffer argument.
-    for (CallArg& arg : callee->gtArgs.Args())
+    for (CallArg& arg : callee->gtArgs.AbiArgs())
     {
         calleeArgStackSize = roundUp(calleeArgStackSize, arg.AbiInfo.ByteAlignment);
         calleeArgStackSize += arg.AbiInfo.GetStackByteSize();

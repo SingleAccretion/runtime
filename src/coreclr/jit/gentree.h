@@ -4682,7 +4682,6 @@ class CallArgs
     void RemovedWellKnownArg(WellKnownArg arg);
     regNumber GetCustomRegister(Compiler* comp, CorInfoCallConvExtension cc, WellKnownArg arg);
     void CreateEffectiveRetBufferArg(Compiler* comp, GenTreeCall* call);
-    void DetachEffectiveRetBufferArg();
     void SplitArg(CallArg* arg, unsigned numRegs, unsigned numSlots);
     void SortArgs(Compiler* comp, GenTreeCall* call, CallArg** sortedArgs);
 
@@ -4845,6 +4844,54 @@ public:
         }
     };
 
+    class AbiArgIterator
+    {
+        CallArg* m_arg;
+        CallArg* m_effectiveRetBufferArg;
+
+        void SetNextArg(CallArg* nextArg)
+        {
+            if ((m_effectiveRetBufferArg != nullptr) && (nextArg == m_effectiveRetBufferArg->GetNext()))
+            {
+                m_arg                   = m_effectiveRetBufferArg;
+                m_effectiveRetBufferArg = nullptr;
+            }
+            else
+            {
+                m_arg = nextArg;
+            }
+        }
+
+    public:
+        explicit AbiArgIterator(CallArg* arg, CallArg* effectiveRetBufferArg)
+            : m_effectiveRetBufferArg(effectiveRetBufferArg)
+        {
+            SetNextArg(arg);
+        }
+
+        // clang-format off
+        CallArg& operator*() const { return *m_arg; }
+        CallArg* operator->() const { return m_arg; }
+        CallArg* GetArg() const { return m_arg; }
+        // clang-format on
+
+        AbiArgIterator& operator++()
+        {
+            SetNextArg(m_arg->GetNext());
+            return *this;
+        }
+
+        bool operator==(const AbiArgIterator& i) const
+        {
+            return m_arg == i.m_arg;
+        }
+
+        bool operator!=(const AbiArgIterator& i) const
+        {
+            return m_arg != i.m_arg;
+        }
+    };
+
     using ArgIterator     = CallArgIterator<&CallArg::GetNext>;
     using LateArgIterator = CallArgIterator<&CallArg::GetLateNext>;
 
@@ -4862,6 +4909,12 @@ public:
     IteratorPair<LateArgIterator> LateArgs()
     {
         return IteratorPair<LateArgIterator>(LateArgIterator(m_lateHead), LateArgIterator(nullptr));
+    }
+
+    IteratorPair<AbiArgIterator> AbiArgs()
+    {
+        return IteratorPair<AbiArgIterator>(
+            AbiArgIterator(m_head, m_effectiveRetBufferArg), AbiArgIterator(nullptr, nullptr));
     }
 };
 

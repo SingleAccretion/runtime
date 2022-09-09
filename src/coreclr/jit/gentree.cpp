@@ -1888,12 +1888,12 @@ void CallArgs::CreateEffectiveRetBufferArg(Compiler* comp, GenTreeCall* call)
         return;
     }
 
-    // Some calls have an "out buffer" that is not actually a ret buff in the
-    // ABI sense. We take the path here for those but it should not be marked
-    // as the ret buff arg since it always follow the normal ABI for parameters.
+    // Some calls have an "out buffer" that is not actually a ret buff in the ABI sense. We take the path here for
+    // those but it should not be marked as the ret buff arg since it always follow the normal ABI for parameters.
     WellKnownArg wellKnownArgType = call->ShouldHaveRetBufArg() ? WellKnownArg::RetBuffer : WellKnownArg::None;
     NewCallArg   newArg           = NewCallArg::Primitive(nullptr, TYP_BYREF).WellKnown(wellKnownArgType);
-    CallArg*     arg              = nullptr;
+    CallArg*     arg              = new (comp->getAllocator(CMK_ASTNode)) CallArg(newArg);
+    CallArg*     nextArg          = nullptr;
 
 #if !defined(TARGET_ARM)
     // Unmanaged instance methods on Windows or Unix X86 need the retbuf arg after the first (this) parameter
@@ -1911,18 +1911,18 @@ void CallArgs::CreateEffectiveRetBufferArg(Compiler* comp, GenTreeCall* call)
             if (Args().begin() == Args().end())
             {
                 // Empty arg list
-                arg = PushFront(comp, newArg);
+                nextArg = nullptr;
             }
             else if (cc == CorInfoCallConvExtension::Thiscall)
             {
                 // For thiscall, the "this" parameter is not included in the argument list reversal,
                 // so we need to put the return buffer as the last parameter.
-                arg = PushBack(comp, newArg);
+                nextArg = nullptr;
             }
             else if (Args().begin()->GetNext() == nullptr)
             {
                 // Only 1 arg, so insert at beginning
-                arg = PushFront(comp, newArg);
+                nextArg = Args().begin().GetArg();
             }
             else
             {
@@ -1939,16 +1939,16 @@ void CallArgs::CreateEffectiveRetBufferArg(Compiler* comp, GenTreeCall* call)
                 }
 
                 assert(secondLastArg && "Expected to find second last arg");
-                arg = InsertAfter(comp, secondLastArg, newArg);
+                nextArg = secondLastArg->GetNext();
             }
 #else
             if (Args().begin() == Args().end())
             {
-                arg = PushFront(comp, newArg);
+                nextArg = nullptr;
             }
             else
             {
-                arg = InsertAfter(comp, Args().begin().GetArg(), newArg);
+                nextArg = Args().begin()->GetNext();
             }
 #endif
         }
@@ -1958,10 +1958,10 @@ void CallArgs::CreateEffectiveRetBufferArg(Compiler* comp, GenTreeCall* call)
             // The argument list has already been reversed.
             // Insert the return buffer as the last node so it will be pushed on to the stack last
             // as required by the native ABI.
-            arg = PushBack(comp, newArg);
+            nextArg = nullptr;
 #else
             // Insert the return value buffer into the argument list as first byref parameter
-            arg = PushFront(comp, newArg);
+            nextArg = Args().begin().GetArg();
 #endif
         }
     }
@@ -1969,34 +1969,34 @@ void CallArgs::CreateEffectiveRetBufferArg(Compiler* comp, GenTreeCall* call)
 #endif // !defined(TARGET_ARM)
     {
         // Insert the return value buffer into the argument list as first byref parameter after 'this'
-        arg = InsertAfterThisOrFirst(comp, newArg);
+        nextArg = HasThisPointer() ? GetThisArg()->GetNext() : Args().begin().GetArg();
     }
 
+    arg->SetNext(nextArg);
     m_effectiveRetBufferArg = arg;
-}
-
-void CallArgs::DetachEffectiveRetBufferArg()
-{
-    if (m_effectiveRetBufferArg != nullptr)
-    {
-        Remove(m_effectiveRetBufferArg);
-    }
 }
 
 CallArg* CallArgs::AttachEffectiveRetBufferArg(GenTree* node)
 {
+    assert(AreArgsComplete());
     assert(varTypeIsI(node) && (m_effectiveRetBufferArg != nullptr));
 
-    // We re-attach the return buffer argument in LIR, at which point the ordering does not matter.
-    // Just set it as the first argument for simplicity.
-    CallArg* arg            = m_effectiveRetBufferArg;
-    m_effectiveRetBufferArg = nullptr;
+    // Insert the argument at the appropriate place. Strictly speaking, this is
+    // not necessary - the insertion will happen in LIR, at which point the ordering
+    // does not matter, as both ABI info and execution order have been determined.
+    // Still, we choose to maintain it, for simplicity.
+    CallArg*  arg  = m_effectiveRetBufferArg;
+    CallArg** slot = &m_head;
+    while (*slot != arg->GetNext())
+    {
+        slot = &(*slot)->NextRef();
+    }
 
-    arg->SetNext(m_head);
-    m_head = arg;
+    *slot                   = arg;
+    m_effectiveRetBufferArg = nullptr;
     AddedWellKnownArg(arg->GetWellKnownArg());
 
-    if (arg->AbiInfo.IsPassedInRegisters() && AreArgsComplete())
+    if (arg->AbiInfo.IsPassedInRegisters())
     {
         // Maintain the invariant that all register args are late.
         arg->SetLateNode(node);
