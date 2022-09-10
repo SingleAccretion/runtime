@@ -6353,41 +6353,21 @@ GenTree* Compiler::fgMorphPotentialTailCall(GenTreeCall* call)
         assert(treeWithCall == call);
     }
 #endif
-    // Store the call type for later to introduce the correct placeholder.
-    var_types origCallType = call->TypeGet();
 
-    GenTree* result;
-    if (!canFastTailCall && !tailCallViaJitHelper)
+    // Store the call type for later to introduce the correct placeholder.
+    var_types origCallType       = call->TypeGet();
+    bool      tailCallViaHelpers = !canFastTailCall && !tailCallViaJitHelper;
+    GenTree*  result;
+
+    if (tailCallViaHelpers)
     {
-        // For tailcall via CORINFO_TAILCALL_HELPERS we transform into regular
-        // calls with (to the JIT) regular control flow so we do not need to do
-        // much special handling.
         result = fgMorphTailCallViaHelpers(call, tailCallHelpers);
     }
     else
     {
         // Otherwise we will transform into something that does not return. For
         // fast tailcalls a "jump" and for tailcall via JIT helper a call to a
-        // JIT helper that does not return. So peel off everything after the
-        // call.
-        Statement* nextMorphStmt = fgMorphStmt->GetNextStmt();
-        JITDUMP("Remove all stmts after the call.\n");
-        while (nextMorphStmt != nullptr)
-        {
-            Statement* stmtToRemove = nextMorphStmt;
-            nextMorphStmt           = stmtToRemove->GetNextStmt();
-            fgRemoveStmt(compCurBB, stmtToRemove);
-        }
-
-        bool     isRootReplaced = false;
-        GenTree* root           = fgMorphStmt->GetRootNode();
-
-        if (root != call)
-        {
-            JITDUMP("Replace root node [%06d] with [%06d] tail call node.\n", dspTreeID(root), dspTreeID(call));
-            isRootReplaced = true;
-            fgMorphStmt->SetRootNode(call);
-        }
+        // JIT helper that does not return.
 
         // Avoid potential extra work for the return (for example, vzeroupper)
         call->gtType = TYP_VOID;
@@ -6457,18 +6437,44 @@ GenTree* Compiler::fgMorphPotentialTailCall(GenTreeCall* call)
             compCurBB->bbJumpKind = BBJ_THROW;
         }
 
-        if (isRootReplaced)
+        result = call;
+    }
+
+    // Remove everything after the call. This is required in the fast/x86 helper case, where
+    // the resulting call does not return, and in the helpers-based mechanism, for calls with
+    // return buffers (see "fgCreateCallDispatcherAndGetResult").
+    if (!tailCallViaHelpers || (genActualType(result) != genActualType(origCallType)))
+    {
+        assert(result->TypeIs(TYP_VOID));
+
+        JITDUMP("Remove %s stmts after the call.\n", tailCallViaHelpers ? "non-return" : "all");
+        Statement* nextMorphStmt = fgMorphStmt->GetNextStmt();
+        while (nextMorphStmt != nullptr)
         {
+            // The helpers-based path uses normal flow: don't remove the RETURN node.
+            if (tailCallViaHelpers && nextMorphStmt->GetRootNode()->OperIs(GT_RETURN))
+            {
+                break;
+            }
+
+            Statement* stmtToRemove = nextMorphStmt;
+            nextMorphStmt           = stmtToRemove->GetNextStmt();
+            fgRemoveStmt(compCurBB, stmtToRemove);
+        }
+
+        GenTree* root = fgMorphStmt->GetRootNode();
+
+        if (root != result)
+        {
+            JITDUMP("Replace root node [%06d] with [%06d] tail call node.\n", dspTreeID(root), dspTreeID(result));
+            fgMorphStmt->SetRootNode(result);
+
             // We have replaced the root node of this stmt and deleted the rest, but we still have the deleted, dead
             // nodes on the `fgMorph*` stack if the root node was an `ASG`, `RET` or `CAST`. Return a zero con node
             // to exit morphing of the old trees without asserts and forbid POST_ORDER morphing doing something wrong
             // with our call.
             var_types zeroType = (origCallType == TYP_STRUCT) ? TYP_INT : genActualType(origCallType);
             result             = fgMorphTree(gtNewZeroConNode(zeroType));
-        }
-        else
-        {
-            result = call;
         }
     }
 
@@ -6866,7 +6872,7 @@ GenTree* Compiler::fgMorphTailCallViaHelpers(GenTreeCall* call, CORINFO_TAILCALL
 //     &CallTargetFunc
 //     ADDR RetValue
 //   RetValue
-// If the call has type TYP_VOID, only create the CALL node.
+// If the call has type TYP_VOID, or uses retbuf, only create the CALL node.
 //
 // Arguments:
 //    origCall - the call
@@ -6875,7 +6881,8 @@ GenTree* Compiler::fgMorphTailCallViaHelpers(GenTreeCall* call, CORINFO_TAILCALL
 //    dispatcherHnd - the handle of the tailcall dispatcher function
 //
 // Return Value:
-//    A node that can be used in place of the original call.
+//    In most cases, a node that can be used in place of the original call.
+//    Otherwise, if the original call used retbuf, a VOID node.
 //
 GenTree* Compiler::fgCreateCallDispatcherAndGetResult(GenTreeCall*          origCall,
                                                       CORINFO_METHOD_HANDLE callTargetStubHnd,
@@ -6890,22 +6897,13 @@ GenTree* Compiler::fgCreateCallDispatcherAndGetResult(GenTreeCall*          orig
     GenTree*     retVal    = nullptr;
     unsigned int newRetLcl = BAD_VAR_NUM;
 
-    // TODO-Args: this is now pessimized (if correct) path. Restore the return buffer optimization.
-    if (origCall->gtArgs.HasRetBuffer())
+    // See if we can use the caller's return buffer, avoiding creating a temp.
+    if (origCall->ShouldHaveRetBufArg())
     {
-        JITDUMP("Using the retbuf\n");
-        GenTree* retBufArg = origCall->gtArgs.GetRetBufferArg()->GetNode();
+        JITDUMP("Using the caller's retbuf as return value\n");
+        assert(varTypeIsStruct(origCall) && (info.compRetBuffArg != BAD_VAR_NUM));
 
-        assert(info.compRetBuffArg != BAD_VAR_NUM);
-        assert(retBufArg->OperIsLocal());
-        assert(retBufArg->AsLclVarCommon()->GetLclNum() == info.compRetBuffArg);
-
-        retValArg = retBufArg;
-
-        if (origCall->gtType != TYP_VOID)
-        {
-            retVal = gtClone(retBufArg);
-        }
+        retValArg = gtNewLclvNode(info.compRetBuffArg, TYP_BYREF);
     }
     else if (origCall->gtType != TYP_VOID)
     {
@@ -6957,12 +6955,11 @@ GenTree* Compiler::fgCreateCallDispatcherAndGetResult(GenTreeCall*          orig
     NewCallArg retValCallArg  = NewCallArg::Primitive(retValArg);
     callDispatcherNode->gtArgs.PushFront(this, retAddrSlotArg, callTargetArg, retValCallArg);
 
-    if (origCall->gtType == TYP_VOID)
+    if (retVal == nullptr)
     {
         return callDispatcherNode;
     }
 
-    assert(retVal != nullptr);
     GenTree* comma = gtNewOperNode(GT_COMMA, origCall->TypeGet(), callDispatcherNode, retVal);
 
     // The JIT seems to want to CSE this comma and messes up multi-reg ret
@@ -13618,8 +13615,8 @@ void Compiler::fgMorphStmts(BasicBlock* block)
             }
 
             noway_assert(compTailCallUsed);
-            noway_assert(morphedTree->gtOper == GT_CALL);
-            GenTreeCall* call = morphedTree->AsCall();
+            noway_assert(morphedTree->gtEffectiveVal()->OperIs(GT_CALL));
+            GenTreeCall* call = morphedTree->gtEffectiveVal()->AsCall();
             // Could be
             //   - a fast call made as jmp in which case block will be ending with
             //   BBJ_RETURN (as we need epilog) and marked as containing a jmp.
