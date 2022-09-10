@@ -10062,25 +10062,21 @@ void Compiler::impImportBlockCode(BasicBlock* block)
                         varTypeIsStruct(op1)) // UnboxNullable helper returns a struct.
                        );
 
-                /*
-                  ----------------------------------------------------------------------
-                  | \ helper  |                         |                              |
-                  |   \       |                         |                              |
-                  |     \     | CORINFO_HELP_UNBOX      | CORINFO_HELP_UNBOX_NULLABLE  |
-                  |       \   | (which returns a BYREF) | (which returns a STRUCT)     |                              |
-                  | opcode  \ |                         |                              |
-                  |---------------------------------------------------------------------
-                  | UNBOX     | push the BYREF          | spill the STRUCT to a local, |
-                  |           |                         | push the BYREF to this local |
-                  |---------------------------------------------------------------------
-                  | UNBOX_ANY | push a GT_OBJ of        | push the STRUCT              |
-                  |           | the BYREF               | For Linux when the           |
-                  |           |                         |  struct is returned in two   |
-                  |           |                         |  registers create a temp     |
-                  |           |                         |  which address is passed to  |
-                  |           |                         |  the unbox_nullable helper.  |
-                  |---------------------------------------------------------------------
-                */
+                //
+                // ----------------------------------------------------------------------
+                // | \ helper  |                         |                              |
+                // |   \       |                         |                              |
+                // |     \     | CORINFO_HELP_UNBOX      | CORINFO_HELP_UNBOX_NULLABLE  |
+                // |       \   | (which returns a BYREF) | (which returns a STRUCT)     |
+                // | opcode  \ |                         |                              |
+                // |---------------------------------------------------------------------
+                // | UNBOX     | push the BYREF          | spill the STRUCT to a local, |
+                // |           |                         | push the BYREF to this local |
+                // |---------------------------------------------------------------------
+                // | UNBOX_ANY | push a GT_OBJ of        | push the STRUCT              |
+                // |           | the BYREF               |                              |
+                // |---------------------------------------------------------------------
+                //
 
                 if (opcode == CEE_UNBOX)
                 {
@@ -10117,50 +10113,10 @@ void Compiler::impImportBlockCode(BasicBlock* block)
                     }
 
                     assert(helper == CORINFO_HELP_UNBOX_NULLABLE && "Make sure the helper is nullable!");
+                    assert(op1->gtType == TYP_STRUCT);
 
-#if FEATURE_MULTIREG_RET
-
-                    // TODO-RetBuf: see if this spilling is needed. In principle, it should not be, but
-                    // undoing the temp may confuse some code expecting the call to be a multi-reg one.
-                    if (varTypeIsStruct(op1) &&
-                        IsMultiRegReturnedType(resolvedToken.hClass, CorInfoCallConvExtension::Managed))
-                    {
-                        // Unbox nullable helper returns a TYP_STRUCT.
-                        // For the multi-reg case we need to spill it to a temp so that
-                        // we can pass the address to the unbox_nullable jit helper.
-
-                        unsigned tmp = lvaGrabTemp(true DEBUGARG("UNBOXing a register returnable nullable"));
-                        lvaTable[tmp].lvIsMultiRegArg = true;
-                        lvaSetStruct(tmp, resolvedToken.hClass, true /* unsafe value cls check */);
-
-                        op2 = gtNewLclvNode(tmp, TYP_STRUCT);
-                        op1 = impAssignStruct(op2, op1, CHECK_SPILL_ALL);
-                        assert(op1->gtType == TYP_STRUCT); // We must be assigning the return struct to the temp.
-
-                        op2 = gtNewLclVarAddrNode(tmp, TYP_BYREF);
-                        op1 = gtNewOperNode(GT_COMMA, TYP_BYREF, op1, op2);
-
-                        // In this case the return value of the unbox helper is TYP_BYREF.
-                        // Make sure the right type is placed on the operand type stack.
-                        impPushOnStack(op1, tiRetVal);
-
-                        // Load the struct.
-                        oper = GT_OBJ;
-
-                        assert(op1->gtType == TYP_BYREF);
-
-                        goto OBJ;
-                    }
-                    else
-
-#endif // !FEATURE_MULTIREG_RET
-
-                    {
-                        // If non register passable struct we have it materialized in the RetBuf.
-                        assert(op1->gtType == TYP_STRUCT);
-                        tiRetVal = verMakeTypeInfo(resolvedToken.hClass);
-                        assert(tiRetVal.IsValueClass());
-                    }
+                    tiRetVal = verMakeTypeInfo(resolvedToken.hClass);
+                    assert(tiRetVal.IsValueClass());
                 }
 
                 impPushOnStack(op1, tiRetVal);
