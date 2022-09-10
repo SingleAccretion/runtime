@@ -2706,7 +2706,6 @@ void Compiler::lvaSetVarDoNotEnregister(unsigned varNum DEBUGARG(DoNotEnregister
             break;
         case DoNotEnregisterReason::HiddenBufferStructArg:
             JITDUMP("it is hidden buffer struct arg\n");
-            assert(varDsc->IsHiddenBufferStructArg());
             break;
         case DoNotEnregisterReason::DontEnregStructs:
             JITDUMP("struct enregistration is disabled\n");

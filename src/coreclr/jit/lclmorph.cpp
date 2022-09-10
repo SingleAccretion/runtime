@@ -904,6 +904,24 @@ private:
 
         GenTree* node = val.Node();
 
+        // Calls with return buffers used to be expanded very early (in importer), making locals defined
+        // by them address-exposed. Here we preserve part of this behavior to avoid regressions associated
+        // with the fact that morph will otherwise believe the local can be promoted independently, and
+        // decompose uses accordinly.
+        if ((user != nullptr) && user->OperIs(GT_ASG) && (user->AsOp()->gtGetOp1() == node))
+        {
+            GenTree* defValue = user->gtGetOp2();
+            if (defValue->IsCall() && defValue->AsCall()->TreatAsShouldHaveRetBufArg())
+            {
+                LclVarDsc* varDsc = m_compiler->lvaGetDesc(val.LclNum());
+                if (!varDsc->lvIsTemp && varDsc->lvPromoted)
+                {
+                    m_compiler->lvaSetVarDoNotEnregister(val.LclNum()
+                                                             DEBUGARG(DoNotEnregisterReason::HiddenBufferStructArg));
+                }
+            }
+        }
+
         if (node->OperIs(GT_LCL_VAR, GT_LCL_FLD))
         {
             // If the location is accessed directly then we don't need to do anything.
