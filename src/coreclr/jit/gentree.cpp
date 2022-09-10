@@ -1883,7 +1883,7 @@ bool CallArgs::IsNonStandard(Compiler* comp, GenTreeCall* call, CallArg* arg)
 
 void CallArgs::CreateEffectiveRetBufferArg(Compiler* comp, GenTreeCall* call)
 {
-    if (!call->TreatAsShouldHaveRetBufArg(comp))
+    if (!call->TreatAsShouldHaveRetBufArg())
     {
         return;
     }
@@ -2477,7 +2477,7 @@ int GenTreeCall::GetNonStandardAddedArgCount(Compiler* compiler) const
 //     aren't actually defined to return a struct, so they don't expect
 //     their RetBuf to be passed in x8, instead they  expect it in x0.
 //
-bool GenTreeCall::TreatAsShouldHaveRetBufArg(Compiler* compiler) const
+bool GenTreeCall::TreatAsShouldHaveRetBufArg() const
 {
     if (ShouldHaveRetBufArg())
     {
@@ -2492,7 +2492,7 @@ bool GenTreeCall::TreatAsShouldHaveRetBufArg(Compiler* compiler) const
         // There are three possible helper calls that use this path:
         //  CORINFO_HELP_GETFIELDSTRUCT,  CORINFO_HELP_UNBOX_NULLABLE
         //  CORINFO_HELP_PINVOKE_CALLI
-        CorInfoHelpFunc helpFunc = compiler->eeGetHelperNum(gtCallMethHnd);
+        CorInfoHelpFunc helpFunc = Compiler::eeGetHelperNum(gtCallMethHnd);
 
         if (helpFunc == CORINFO_HELP_GETFIELDSTRUCT)
         {

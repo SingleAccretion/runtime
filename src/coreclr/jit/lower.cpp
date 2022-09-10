@@ -2087,7 +2087,7 @@ GenTree* Lowering::LowerCall(GenTree* node)
     }
 #endif
 
-    if (call->TreatAsShouldHaveRetBufArg(comp))
+    if (call->TreatAsShouldHaveRetBufArg())
     {
         LowerCallByRefStruct(call);
     }
@@ -4626,7 +4626,7 @@ void Lowering::LowerCallStruct(GenTreeCall* call)
 
 void Lowering::LowerCallByRefStruct(GenTreeCall* call)
 {
-    assert(call->TreatAsShouldHaveRetBufArg(comp) && !call->gtArgs.HasRetBuffer());
+    assert(call->TreatAsShouldHaveRetBufArg() && !call->gtArgs.HasRetBuffer());
 
     LIR::Use callUse;
     GenTree* retBufAddr = nullptr;
@@ -4759,11 +4759,10 @@ void Lowering::LowerCallByRefStruct(GenTreeCall* call)
     call->ChangeType(TYP_VOID);
     CallArg* retBufArg = call->gtArgs.AttachEffectiveRetBufferArg(retBufAddr);
 
-    GenTreeLclVarCommon* dstLclAddr = nullptr;
-    if (retBufAddr->DefinesLocalAddr(&dstLclAddr))
+    if (retBufAddr->OperIsLocalAddr())
     {
-        assert((dstLclAddr->gtFlags & GTF_VAR_DEF) != 0); // LIR liveness relies on this being set.
-        unsigned lclNum = dstLclAddr->GetLclNum();
+        assert((retBufAddr->gtFlags & GTF_VAR_DEF) != 0); // LIR liveness relies on this being set.
+        unsigned lclNum = retBufAddr->AsLclVarCommon()->GetLclNum();
 
         if (retBufArg->GetWellKnownArg() == WellKnownArg::RetBuffer)
         {
