@@ -2271,37 +2271,25 @@ bool Compiler::fgRemoveDeadStore(GenTree**        pTree,
                                  bool*            pStmtInfoDirty,
                                  bool* pStoreRemoved DEBUGARG(bool* treeModf))
 {
-    assert(!compRationalIRForm);
+    assert(!compRationalIRForm && (*pTree)->OperIs(GT_LCL_VAR, GT_LCL_FLD) && (((*pTree)->gtFlags & GTF_VAR_DEF) != 0));
 
     // Vars should have already been checked for address exposure by this point.
     assert(!varDsc->IsAddressExposed());
 
-    GenTree*       asgNode  = nullptr;
-    GenTree* const tree     = *pTree;
-    GenTree*       nextNode = tree->gtNext;
-
-    // We can have two types of assignments: ASG(LCL_VAR/FLD, ...), in which case the assignment must have
-    // been reversed, so it is [RHS, LCL_VAR/FLD, ASG] in linear order, or we have a call, in which case we
-    // bail (we most likely cannot remove the call anyway).
-    if (tree->OperIs(GT_LCL_VAR, GT_LCL_FLD))
-    {
-        assert((tree->gtFlags & GTF_VAR_DEF) != 0);
-        assert(nextNode != nullptr);
-
-        if (nextNode->OperIs(GT_ASG) && (tree == nextNode->gtGetOp1()))
-        {
-            asgNode = nextNode;
-        }
-    }
+    // We have ASG(LCL_VAR/FLD, ...), with the assignment reversed, so it is [RHS, LCL_VAR/FLD, ASG] in linear order.
+    GenTree* const tree    = *pTree;
+    GenTree*       asgNode = tree->gtNext;
+    GenTree*       rhsNode = asgNode->gtGetOp2();
+    assert(asgNode->OperIs(GT_ASG));
 
     *pStoreRemoved = false;
 
-    if (asgNode == nullptr)
+    if (rhsNode->IsCall() && rhsNode->AsCall()->ShouldHaveRetBufArg())
     {
+        // Leave dead definitions made by calls with return buffers alone; making
+        // the calls unused will force lowering to create dummy on-frame locals.
         return false;
     }
-
-    GenTree* rhsNode = asgNode->gtGetOp2();
 
     // We are now committed to removing the store.
     *pStoreRemoved = true;
