@@ -749,13 +749,31 @@ bool Compiler::fgForwardSubStatement(Statement* stmt)
         return false;
     }
 
-    // A "CanBeReplacedWithItsField" SDSU can serve as a sort of "BITCAST<primitive>(struct)"
-    // device, forwarding it risks forcing things to memory.
-    //
-    if (fwdSubNode->IsCall() && varDsc->CanBeReplacedWithItsField(this))
+    if (fwdSubNode->IsCall())
     {
-        JITDUMP(" fwd sub local is 'CanBeReplacedWithItsField'\n");
-        return false;
+        // A "CanBeReplacedWithItsField" SDSU can serve as a sort of "BITCAST<primitive>(struct)"
+        // device, forwarding it risks forcing things to memory.
+        //
+        if (varDsc->CanBeReplacedWithItsField(this))
+        {
+            JITDUMP(" fwd sub local is 'CanBeReplacedWithItsField'\n");
+            return false;
+        }
+
+        // Forwarding calls with return buffers may induce DNER on locals that would otherwise
+        // be independently promoted. Keep the SDSU DNERed instead for such cases.
+        // TODO-Cleanup: consider handling such cases in block morphing instead, by creating a
+        // temporary and DNERing it (granted, effectively undoing the forward sub).
+        //
+        if (fwdSubNode->AsCall()->TreatAsShouldHaveRetBufArg() && fsv.GetParentNode()->OperIs(GT_ASG))
+        {
+            GenTree* lhs = fsv.GetParentNode()->gtGetOp1();
+            if (lhs->OperIs(GT_LCL_VAR) && lvaGetDesc(lhs->AsLclVar())->lvPromoted)
+            {
+                JITDUMP(" fwd sub node is call with a return buffer; parent is a potential register candidate def\n");
+                return false;
+            }
+        }
     }
 
     // There are implicit assumptions downstream on where/how multi-reg ops
