@@ -273,7 +273,10 @@ public:
             m_accumulatedFlags |= GTF_GLOB_REF;
         }
 
-        m_accumulatedFlags |= (node->gtFlags & GTF_GLOB_EFFECT);
+        if (!isDef)
+        {
+            m_accumulatedFlags |= (node->gtFlags & GTF_GLOB_EFFECT);
+        }
 
         return fgWalkResult::WALK_CONTINUE;
     }
